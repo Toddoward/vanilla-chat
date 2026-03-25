@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment Variables
+.env
+
+# Storage (로컬 데이터 — 공유 금지)
+/storage/db/*
+/storage/vectors/*
+/storage/uploads/*
+!storage/db/.gitkeep
+!storage/vectors/.gitkeep
+!storage/uploads/.gitkeep
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Distribution
+dist/
+build/
+*.egg-info/

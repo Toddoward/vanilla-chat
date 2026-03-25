@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+jinja2
+python-multipart
+pydantic
+python-dotenv
+ollama
+sqlalchemy
+numpy
+faiss-cpu
+requests
