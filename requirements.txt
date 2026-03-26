@@ -1,11 +1,32 @@
+# ── Server ──────────────────────────────
 fastapi
-uvicorn
-jinja2
-python-multipart
-pydantic
-python-dotenv
-ollama
-sqlalchemy
-numpy
-faiss-cpu
-requests
+uvicorn[standard]
+python-multipart          # 파일 업로드
+
+# ── LLM / Embedding ─────────────────────
+ollama                    # Ollama Python 클라이언트
+FlagEmbedding             # BGE-M3, BGE-Reranker-v2-M3
+
+# ── Vector DB ───────────────────────────
+sqlite-vec                # SQLite 벡터 확장
+
+# ── NLP / Chunking ──────────────────────
+tiktoken                  # 토큰 카운팅 근사
+langchain-text-splitters  # 문서 청킹
+
+# ── File Parsing ────────────────────────
+pymupdf                   # PDF 파싱
+python-docx               # DOCX 파싱
+pillow                    # 이미지 전처리 (VLM 입력)
+
+# ── System / Utilities ──────────────────
+psutil                    # 하드웨어 감지
+pyyaml                    # app_config.yaml 파싱
+python-dotenv             # .env 로드
+apscheduler               # 백그라운드 주기 스케줄러 (파일 검증, 캐시 TTL)
+httpx                     # 외부 API 요청 (collector)
+
+# ── Cloud Providers (Optional) ──────────
+# anthropic
+# openai
+# google-generativeai

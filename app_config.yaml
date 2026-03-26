@@ -1,0 +1,30 @@
+app:
+  name: "Vanilla Chat"           # 헤더/탭에 표시될 앱 이름
+  logo: "static/images/logo_color.png"  # 단일 로고 경로
+  logo_emoji_fallback: "🍨"     # 로고 파일 없을 시 표시할 이모지
+
+models:
+  response: qwen3.5:4b          # 텍스트 생성 모델
+  vision: qwen3.5:4b            # 이미지/문서 VLM (response와 동일 시 인스턴스 공유)
+  embedding: bge-m3:latest      # Dense + Sparse + Multi-vector 임베딩 (Ollama)
+  reranker: bge-reranker-v2-m3  # RAG 결과 재순위 (FlagEmbedding 라이브러리)
+
+context:
+  user_input_ratio: 0.20      # 전체 컨텍스트 중 사용자 입력 할당 비율
+  summary_trigger: 0.80       # 이 비율 도달 시 백그라운드 요약 트리거
+
+rag:
+  chunk_size: 512
+  chunk_overlap: 64
+  top_k: 5
+
+file_links:
+  verify_interval_minutes: 10  # 파일 경로 백그라운드 검증 주기
+
+extensions:
+  collector: false             # 외부 API 온디맨드 수집 활성화 여부
+  cloud_providers: false       # 클라우드 AI 연동 활성화 여부
+
+system_prompt: |
+  You are Vanilla Chat, a helpful and friendly AI assistant.
+  Respond in the same language the user uses.

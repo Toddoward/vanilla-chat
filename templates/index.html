@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vanilla Chat 🍨</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+  <link rel="icon" type="image/png" href="/static/images/logo_mono.png" />
+</head>
+<body>
+
+<!-- ── 헤더 ── -->
+<header id="header">
+  <div class="header-left">
+    <img
+      id="header-logo"
+      class="app-logo"
+      src=""
+      alt=""
+      style="display:none;"
+    />
+    <span id="header-logo-emoji" class="app-logo-emoji" style="display:none;"></span>
+    <span class="app-name" id="app-name"></span>
+  </div>
+  <div class="header-right">
+    <div class="model-status" id="model-status">
+      <span class="status-dot"></span>
+      <span class="status-text" id="status-text">연결 중...</span>
+    </div>
+  </div>
+</header>
+
+<div id="app">
+
+  <!-- ── 사이드바 ── -->
+  <nav id="sidebar">
+
+    <!-- 상단 고정 버튼 영역 -->
+    <div class="sidebar-top">
+      <!-- 확장/축소 토글 -->
+      <button class="sidebar-btn" id="btn-toggle" data-tooltip="사이드바 토글">
+        <span class="btn-icon">☰</span>
+        <span class="btn-label">접기</span>
+      </button>
+
+      <!-- 새 채팅 -->
+      <button class="sidebar-btn" id="btn-new-chat" data-page="chat" data-tooltip="새 채팅">
+        <span class="btn-icon">✏️</span>
+        <span class="btn-label">새 채팅</span>
+      </button>
+
+      <!-- 검색 -->
+      <button class="sidebar-btn" id="btn-search" data-page="search" data-tooltip="검색">
+        <span class="btn-icon">🔍</span>
+        <span class="btn-label">검색</span>
+      </button>
+
+      <!-- 채팅 목록 -->
+      <button class="sidebar-btn" id="btn-chatlist" data-page="chatlist" data-tooltip="채팅 목록">
+        <span class="btn-icon">💬</span>
+        <span class="btn-label">채팅 목록</span>
+      </button>
+
+      <!-- Data Hub -->
+      <button class="sidebar-btn" id="btn-datahub" data-page="datahub" data-tooltip="Data Hub">
+        <span class="btn-icon">🗄️</span>
+        <span class="btn-label">Data Hub</span>
+        <span class="badge" id="datahub-badge"></span>
+      </button>
+    </div>
+
+    <!-- 채팅 목록 (flex-grow 영역) -->
+    <div class="sidebar-chat-list" id="sidebar-chat-list">
+      <!-- JS로 렌더링 -->
+    </div>
+
+    <!-- 하단 고정 영역 -->
+    <div class="sidebar-bottom">
+      <button class="sidebar-btn" id="btn-settings" data-page="settings" data-tooltip="설정">
+        <span class="btn-icon">⚙️</span>
+        <span class="btn-label">설정</span>
+      </button>
+    </div>
+
+  </nav>
+
+  <!-- ── 메인 콘텐츠 ── -->
+  <main id="main">
+
+    <!-- 채팅 페이지 -->
+    <div class="page active" id="page-chat"></div>
+
+    <!-- 검색 페이지 -->
+    <div class="page" id="page-search">
+      <div class="empty-state">🔍 검색 기능은 Phase 5에서 구현됩니다</div>
+    </div>
+
+    <!-- 채팅 목록 페이지 -->
+    <div class="page" id="page-chatlist">
+      <div class="empty-state">💬 채팅 목록은 Phase 5에서 구현됩니다</div>
+    </div>
+
+    <!-- Data Hub 페이지 -->
+    <div class="page" id="page-datahub">
+      <div class="empty-state">🗄️ Data Hub는 Phase 4에서 구현됩니다</div>
+    </div>
+
+    <!-- 설정 페이지 -->
+    <div class="page" id="page-settings">
+      <div class="empty-state">⚙️ 설정은 Phase 6에서 구현됩니다</div>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- 토스트 알림 컨테이너 -->
+<div id="toast-container"></div>
+
+<!-- ── 스크립트 ── -->
+<script src="/static/js/app.js"></script>
+<script src="/static/js/sidebar.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/chatlist.js"></script>
+<script src="/static/js/search.js"></script>
+<script src="/static/js/datahub.js"></script>
+<script src="/static/js/settings.js"></script>
+
+</body>
+</html>

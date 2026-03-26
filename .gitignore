@@ -10,19 +10,14 @@ venv/
 .venv/
 env/
 
-# Environment Variables
+# 민감 정보
 .env
 
-# Storage (로컬 데이터 — 공유 금지)
+# Storage 데이터 (구조 유지, 데이터 제외)
 /storage/db/*
 /storage/vectors/*
-/storage/uploads/*
 !storage/db/.gitkeep
 !storage/vectors/.gitkeep
-!storage/uploads/.gitkeep
-
-# Logs
-*.log
 
 # OS
 .DS_Store
@@ -36,3 +31,9 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Logs
+*.log
+
+# mics
+*.sh
