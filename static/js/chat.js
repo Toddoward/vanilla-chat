@@ -77,8 +77,83 @@ function setHeaderChatTitle(title, loading) {
 }
 
 // ──────────────────────────────────────
-// 로고 헬퍼
+// 파일 첨부 칩 UI (3-7)
 // ──────────────────────────────────────
+var attachedFiles = [];
+
+function setupFileAttach() {
+  var fileInput = document.getElementById('file-input');
+  if (!fileInput) return;
+  fileInput.addEventListener('change', function() {
+    Array.from(fileInput.files).forEach(function(f) {
+      attachedFiles.push(f);
+      renderAttachChips();
+    });
+    fileInput.value = '';
+  });
+}
+
+function renderAttachChips() {
+  var container = document.getElementById('chat-attachments');
+  if (!container) return;
+  container.innerHTML = '';
+  attachedFiles.forEach(function(f, idx) {
+    var chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    chip.innerHTML =
+      '<span class="chip-icon">' + getFileIcon(f.name) + '</span>' +
+      '<span class="chip-name">' + escapeHtml(f.name) + '</span>' +
+      '<button class="chip-remove" data-idx="' + idx + '">✕</button>';
+    chip.querySelector('.chip-remove').addEventListener('click', function() {
+      attachedFiles.splice(idx, 1);
+      renderAttachChips();
+    });
+    container.appendChild(chip);
+  });
+}
+
+function getFileIcon(name) {
+  var ext = name.split('.').pop().toLowerCase();
+  if (['png','jpg','jpeg','webp','gif'].includes(ext)) return '🖼';
+  if (ext === 'pdf') return '📄';
+  if (ext === 'docx') return '📝';
+  return '📎';
+}
+
+function clearAttachments() {
+  attachedFiles = [];
+  renderAttachChips();
+}
+
+// ──────────────────────────────────────
+// 에이전트 상태 인라인 표시 (3-8)
+// ──────────────────────────────────────
+var AGENT_STATUS = {
+  rag:     '🔍 저장된 문서 검색 중...',
+  vision:  '👁️ 이미지 분석 중...',
+  api:     '🌐 데이터 수집 중...',
+};
+
+function showAgentStatus(type) {
+  var label = document.getElementById('indicator-label');
+  if (label && AGENT_STATUS[type]) label.textContent = AGENT_STATUS[type];
+}
+
+// ──────────────────────────────────────
+// RAG 출처 목록 (3-9)
+// ──────────────────────────────────────
+function appendSources(wrap, sources) {
+  if (!sources || !sources.length) return;
+  var div = document.createElement('div');
+  div.className = 'rag-sources';
+  div.innerHTML = '<span class="sources-label">출처</span>' +
+    sources.map(function(s) {
+      return '<span class="source-item" title="' + escapeHtml(s.path || '') + '">' +
+        getFileIcon(s.name || '') + ' ' + escapeHtml(s.name || s.path || '알 수 없음') +
+        '</span>';
+    }).join('');
+  wrap.appendChild(div);
+}
 function makeLogoImg() {
   var logoSrc = ((App.appInfo && App.appInfo.logo) || 'static/images/logo_color.png')
     .replace('logo_color', 'logo_mono');
@@ -138,6 +213,7 @@ function renderChatPage() {
       '</div>' +
     '</div>';
   setupInputEvents();
+  setupFileAttach();
 }
 
 // ──────────────────────────────────────
@@ -260,32 +336,49 @@ function showLogoIndicator() {
   var el = document.getElementById('chat-messages');
   if (!el || document.getElementById('logo-indicator-wrap')) return null;
   document.getElementById('greeting-screen') && document.getElementById('greeting-screen').remove();
+
+  var logoSrc = ((App.appInfo && App.appInfo.logo) || 'static/images/logo_color.png')
+    .replace('logo_color', 'logo_mono');
+  var emoji = (App.appInfo && App.appInfo.logo_emoji_fallback) || '🍨';
+
   var wrap = document.createElement('div');
   wrap.id = 'logo-indicator-wrap';
   wrap.className = 'message-wrap assistant';
+
   var inner = document.createElement('div');
   inner.className = 'logo-indicator-inner';
-  var logoWrap = document.createElement('div');
-  logoWrap.className = 'logo-anim-wrap';
-  var logoSrc = ((App.appInfo && App.appInfo.logo) || 'static/images/logo_color.png').replace('logo_color', 'logo_mono');
-  var emoji = (App.appInfo && App.appInfo.logo_emoji_fallback) || '🍨';
-  var img = document.createElement('img');
-  img.src = '/' + logoSrc;
-  img.className = 'logo-anim-img';
-  img.alt = '';
-  img.onerror = function() {
+
+  var maskWrap = document.createElement('div');
+  maskWrap.className = 'logo-anim-wrap';
+
+  // 로고 존재 확인 후 그라데이션 orb 마스크 적용
+  var testImg = new Image();
+  testImg.onload = function() {
+    var gradContainer = document.createElement('div');
+    gradContainer.className = 'logo-gradient-mask';
+    gradContainer.style.webkitMaskImage = 'url(/' + logoSrc + ')';
+    gradContainer.style.maskImage       = 'url(/' + logoSrc + ')';
+    for (var i = 1; i <= 5; i++) {
+      var orb = document.createElement('div');
+      orb.className = 'logo-orb logo-orb-' + i;
+      gradContainer.appendChild(orb);
+    }
+    maskWrap.appendChild(gradContainer);
+  };
+  testImg.onerror = function() {
     var sp = document.createElement('span');
     sp.className = 'logo-emoji-anim';
     sp.textContent = emoji;
-    logoWrap.innerHTML = '';
-    logoWrap.appendChild(sp);
+    maskWrap.appendChild(sp);
   };
-  logoWrap.appendChild(img);
+  testImg.src = '/' + logoSrc;
+
   var label = document.createElement('span');
   label.id = 'indicator-label';
   label.className = 'indicator-label';
   label.textContent = '입력 생성 중...';
-  inner.appendChild(logoWrap);
+
+  inner.appendChild(maskWrap);
   inner.appendChild(label);
   wrap.appendChild(inner);
   el.appendChild(wrap);
@@ -519,9 +612,17 @@ async function sendMessage() {
         if (!thinkPanel && isActive) {
           thinkPanel = createThinkingPanel();
           thinkPanel.classList.add('thinking-active');
+          // message-wrap.assistant 형태로 래핑 → 버블과 동일 너비
+          var tWrap = document.createElement('div');
+          tWrap.className = 'message-wrap assistant thinking-wrap';
+          var tSlot = document.createElement('div');
+          tSlot.className = 'bubble-logo-slot';
+          tWrap.appendChild(tSlot);
+          tWrap.appendChild(thinkPanel);
           var ind = document.getElementById('logo-indicator-wrap');
           var msgs = document.getElementById('chat-messages');
-          if (ind) ind.before(thinkPanel); else if (msgs) msgs.appendChild(thinkPanel);
+          if (ind) ind.before(tWrap);
+          else if (msgs) msgs.appendChild(tWrap);
           st._panel = thinkPanel;
           var lbl = document.getElementById('indicator-label');
           if (lbl) lbl.remove();
@@ -632,6 +733,7 @@ var chatCSS =
 '@keyframes title-blink{0%,100%{opacity:1;}50%{opacity:0.2;}}' +
 
 /* 말풍선 래퍼 */
+'.message-wrap.thinking-wrap{margin-bottom:4px;}' +
 '.message-wrap{display:flex;flex-direction:row;align-items:flex-start;max-width:760px;position:relative;gap:0;margin-bottom:32px;}' +
 '.message-wrap.user{align-self:flex-end;flex-direction:row-reverse;}' +
 '.message-wrap.assistant{align-self:flex-start;}' +
@@ -669,22 +771,69 @@ var chatCSS =
 
 /* 로고 인디케이터 */
 '#logo-indicator-wrap{align-self:flex-start;margin:4px 0;flex-direction:row !important;}' +
-'.logo-indicator-inner{display:flex;align-items:center;gap:8px;}' +
-'.logo-anim-wrap{flex-shrink:0;width:34px;height:28px;display:flex;align-items:center;justify-content:center;overflow:hidden;}' +
-'.logo-anim-img{width:20px;height:20px;object-fit:contain;' +
-  '-webkit-mask-image:linear-gradient(110deg,transparent 0%,transparent 10%,white 35%,white 65%,transparent 90%,transparent 100%);' +
-  'mask-image:linear-gradient(110deg,transparent 0%,transparent 10%,white 35%,white 65%,transparent 90%,transparent 100%);' +
-  '-webkit-mask-size:300% 100%;mask-size:300% 100%;' +
-  '-webkit-mask-position:200% center;mask-position:200% center;' +
-  'animation:logo-appear 0.4s ease forwards,logo-sweep 2s linear 0.4s infinite;' +
-  'opacity:0;}' +
-'@keyframes logo-appear{from{opacity:0;transform:scale(0.8);}to{opacity:1;transform:scale(1);}}' +
-'@keyframes logo-sweep{' +
-  '0%{-webkit-mask-position:200% center;mask-position:200% center;}' +
-  '100%{-webkit-mask-position:-100% center;mask-position:-100% center;}' +
+'.logo-indicator-inner{display:flex;align-items:center;gap:10px;}' +
+'.logo-anim-wrap{flex-shrink:0;width:34px;height:34px;display:flex;align-items:center;justify-content:center;}' +
+
+/* 그라데이션 마스크 컨테이너 */
+'.logo-gradient-mask{' +
+  'width:34px;height:34px;position:relative;overflow:hidden;' +
+  '-webkit-mask-size:contain;mask-size:contain;' +
+  '-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;' +
+  '-webkit-mask-position:center;mask-position:center;' +
+  'animation:logo-appear 0.5s ease forwards;opacity:0;' +
 '}' +
-'.logo-anim-img.done{animation:none;-webkit-mask-image:none;mask-image:none;opacity:0.5;}' +
-'.logo-emoji-anim{font-size:20px;animation:logo-appear 0.4s ease forwards,logo-pulse 1.8s ease-in-out 0.4s infinite;opacity:0;}' +
+'@keyframes logo-appear{from{opacity:0;transform:scale(0.8);}to{opacity:1;transform:scale(1);}}' +
+
+/* orb 공통 */
+'.logo-orb{position:absolute;border-radius:50%;mix-blend-mode:hard-light;opacity:0.9;}' +
+
+/* orb 1 — vanilla gold */
+'.logo-orb-1{' +
+  'width:120%;height:120%;top:-10%;left:-10%;' +
+  'background:radial-gradient(circle at center,rgba(232,201,122,0.9) 0,rgba(232,201,122,0) 60%) no-repeat;' +
+  'animation:orb-vertical 6s ease infinite;' +
+'}' +
+/* orb 2 — strawberry */
+'.logo-orb-2{' +
+  'width:140%;height:140%;top:-20%;left:-20%;' +
+  'background:radial-gradient(circle at center,rgba(245,140,170,0.85) 0,rgba(245,140,170,0) 55%) no-repeat;' +
+  'animation:orb-circle 8s ease infinite;transform-origin:calc(50% - 20px) calc(50%);' +
+'}' +
+/* orb 3 — mint */
+'.logo-orb-3{' +
+  'width:130%;height:130%;top:-15%;left:-15%;' +
+  'background:radial-gradient(circle at center,rgba(100,220,185,0.8) 0,rgba(100,220,185,0) 50%) no-repeat;' +
+  'animation:orb-horizontal 7s ease infinite;' +
+'}' +
+/* orb 4 — blueberry */
+'.logo-orb-4{' +
+  'width:150%;height:150%;top:-25%;left:-25%;' +
+  'background:radial-gradient(circle at center,rgba(190,120,240,0.75) 0,rgba(190,120,240,0) 50%) no-repeat;' +
+  'animation:orb-circle 10s ease infinite reverse;transform-origin:calc(50% + 15px) calc(50% - 10px);' +
+'}' +
+/* orb 5 — mango */
+'.logo-orb-5{' +
+  'width:120%;height:120%;top:-10%;left:-10%;' +
+  'background:radial-gradient(circle at center,rgba(255,165,100,0.7) 0,rgba(255,165,100,0) 55%) no-repeat;' +
+  'animation:orb-vertical 9s ease infinite reverse;' +
+'}' +
+
+'@keyframes orb-vertical{' +
+  '0%{transform:translateY(-30%);}' +
+  '50%{transform:translateY(30%);}' +
+  '100%{transform:translateY(-30%);}' +
+'}' +
+'@keyframes orb-horizontal{' +
+  '0%{transform:translateX(-30%);}' +
+  '50%{transform:translateX(30%);}' +
+  '100%{transform:translateX(-30%);}' +
+'}' +
+'@keyframes orb-circle{' +
+  '0%{transform:rotate(0deg);}' +
+  '100%{transform:rotate(360deg);}' +
+'}' +
+
+'.logo-emoji-anim{font-size:22px;animation:logo-appear 0.5s ease forwards,logo-pulse 1.8s ease-in-out 0.5s infinite;opacity:0;}' +
 '@keyframes logo-pulse{0%,100%{opacity:0.9;}50%{opacity:0.3;}}' +
 '#logo-indicator-wrap.fade-out{animation:fadeout 0.35s ease forwards;}' +
 '@keyframes fadeout{to{opacity:0;transform:scale(0.85);}}' +
@@ -692,20 +841,53 @@ var chatCSS =
 '@keyframes label-pulse{0%,100%{opacity:0.8;}50%{opacity:0.3;}}' +
 
 /* 추론 패널 */
-'.thinking-panel{align-self:flex-start;max-width:680px;width:100%;border:1px solid var(--border-subtle);border-radius:var(--radius-lg);background:var(--bg-secondary);margin:0 0 4px 34px;overflow:hidden;transition:all 0.2s;}' +
-'.thinking-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;color:var(--text-secondary);font-size:var(--font-size-sm);background:none;border:none;text-align:left;}' +
-'.thinking-toggle:hover{color:var(--text-primary);}' +
-'.thinking-icon{font-size:14px;flex-shrink:0;}' +
+'.thinking-panel{' +
+  'width:100%;' +
+  'border:none;' +
+  'background:none;' +
+  'margin:0 0 4px 0;' +
+  'overflow:visible;' +
+'}' +
+'.thinking-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;color:var(--text-muted);font-size:var(--font-size-xs);background:none;border:none;text-align:left;}' +
+'.thinking-toggle:hover{color:var(--text-secondary);}' +
+'.thinking-icon{font-size:13px;flex-shrink:0;}' +
 '.thinking-label{flex:1;font-weight:500;}' +
-'.thinking-chevron{font-size:18px;color:var(--text-muted);transition:transform 0.2s;display:inline-block;}' +
+'.thinking-chevron{font-size:16px;color:var(--text-muted);transition:transform 0.2s;display:inline-block;}' +
 '.thinking-panel:not(.collapsed) .thinking-chevron{transform:rotate(90deg);}' +
 '.thinking-panel.thinking-active .thinking-icon{animation:think-pulse 1.2s ease-in-out infinite;}' +
 '@keyframes think-pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}' +
-'.thinking-content{max-height:0;overflow:hidden;transition:max-height 0.25s;}' +
-'.thinking-panel:not(.collapsed) .thinking-content{max-height:400px;overflow-y:auto;border-top:1px solid var(--border-subtle);}' +
-'.thinking-content pre{margin:0;padding:12px 14px;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-muted);white-space:pre-wrap;word-break:break-word;line-height:1.6;}' +
+'.thinking-content{' +
+  'max-height:0;' +
+  'overflow:hidden;' +
+  'transition:max-height 0.3s ease;' +
+'}' +
+'.thinking-panel:not(.collapsed) .thinking-content{' +
+  'max-height:300px;' +
+  'overflow-y:auto;' +
+'}' +
+'.thinking-content pre{' +
+  'margin:0;padding:8px 0;' +
+  'font-family:var(--font-mono);' +
+  'font-size:var(--font-size-xs);' +
+  'color:var(--text-muted);' +
+  'white-space:pre-wrap;' +
+  'word-break:break-word;' +
+  'line-height:1.6;' +
+'}' +
 
-/* 입력 영역 */
+/* 파일 첨부 칩 */
+'#chat-attachments{display:flex;flex-wrap:wrap;gap:6px;padding:0 4px 6px;}' +
+'.attach-chip{display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-full);font-size:var(--font-size-xs);color:var(--text-secondary);}' +
+'.chip-icon{font-size:13px;}' +
+'.chip-name{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+'.chip-remove{background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:11px;padding:0 2px;line-height:1;}' +
+'.chip-remove:hover{color:var(--danger);}' +
+
+/* RAG 출처 */
+'.rag-sources{margin-top:6px;margin-left:34px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;}' +
+'.sources-label{font-size:var(--font-size-xs);color:var(--text-muted);font-weight:500;}' +
+'.source-item{font-size:var(--font-size-xs);color:var(--text-muted);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:2px 7px;cursor:default;}' +
+'.source-item:hover{color:var(--text-secondary);}' +
 '#chat-input-area{padding:8px 16px 16px;border-top:1px solid var(--border-subtle);background:var(--bg-primary);flex-shrink:0;}' +
 '#chat-input-row{display:flex;align-items:flex-end;gap:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-xl);padding:8px 12px;transition:border-color 0.15s;}' +
 '#chat-input-row:focus-within{border-color:var(--accent);}' +

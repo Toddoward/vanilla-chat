@@ -51,7 +51,7 @@ class OllamaProvider(BaseProvider):
         self.model_name = model_name
         self.base_url = OLLAMA_BASE_URL
 
-    async def chat(self, messages: list[dict], stream: bool = True, think: bool = False) -> AsyncGenerator[str, None]:
+    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True) -> AsyncGenerator[str, None]:
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream(
                 "POST",
@@ -65,12 +65,33 @@ class OllamaProvider(BaseProvider):
             ) as response:
                 response.raise_for_status()
                 import json
+                thinking_started = False
+                thinking_ended   = False
                 async for line in response.aiter_lines():
                     if line:
                         data = json.loads(line)
-                        if content := data.get("message", {}).get("content", ""):
-                            yield content
+                        msg = data.get("message", {})
+
+                        # thinking 필드: Ollama가 별도로 반환
+                        thinking_chunk = msg.get("thinking", "")
+                        if thinking_chunk:
+                            if not thinking_started:
+                                yield "<think>"
+                                thinking_started = True
+                            yield thinking_chunk
+
+                        # thinking 종료 후 content 시작 시점에 닫기 태그 삽입
+                        content_chunk = msg.get("content", "")
+                        if content_chunk:
+                            if thinking_started and not thinking_ended:
+                                yield "</think>"
+                                thinking_ended = True
+                            yield content_chunk
+
                         if data.get("done"):
+                            # done인데 thinking만 있고 content 없는 경우 닫기
+                            if thinking_started and not thinking_ended:
+                                yield "</think>"
                             break
 
     async def embed(self, text: str) -> list[float]:
@@ -103,8 +124,10 @@ class OllamaProvider(BaseProvider):
         return "".join(result)
 
     async def rerank(self, query: str, documents: list[str]) -> list[float]:
-        """BGE-Reranker는 FlagEmbedding으로 별도 처리. 여기서는 placeholder."""
-        return [1.0] * len(documents)
+        """BGE-Reranker는 FlagEmbedding으로 처리 (file_engine.rerank 위임)."""
+        from core.file_engine import rerank as _rerank
+        loop = __import__("asyncio").get_event_loop()
+        return await loop.run_in_executor(None, _rerank, query, documents)
 
 
 # ──────────────────────────────────────────

@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File
+import shutil
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,6 +22,9 @@ from core.database import (
     init_db, get_state, set_state,
     create_session, get_sessions, get_session, update_session,
     delete_sessions, add_message, get_messages, get_message_count,
+    add_file_link, get_all_file_links, get_file_link,
+    update_file_link_status, delete_file_link,
+    add_chunks, add_vectors,
 )
 from core.providers import (
     model_manager,
@@ -29,6 +33,11 @@ from core.providers import (
     list_ollama_models,
 )
 from core.context_manager import get_context_manager, clear_context_manager
+from core.file_engine import (
+    register_file,
+    start_path_verification_scheduler,
+    stop_path_verification_scheduler,
+)
 
 # ──────────────────────────────────────────
 # 로깅 설정
@@ -89,9 +98,15 @@ async def lifespan(app: FastAPI):
         logger.warning("Ollama 연결 실패 — 서버 실행 후 재시도 필요")
 
     logger.info("🍨 Vanilla Chat 준비 완료")
+
+    # 5. 파일 경로 검증 스케줄러 시작
+    verify_interval = config.get("file_links", {}).get("verify_interval_minutes", 10)
+    await start_path_verification_scheduler(verify_interval)
+
     yield
 
     # ── 종료
+    stop_path_verification_scheduler()
     logger.info("🍨 Vanilla Chat 종료")
 
 
@@ -197,6 +212,227 @@ async def patch_config(updates: dict):
     app.state.config = config
     model_manager.init(config)
     return {"ok": True, "config": config}
+
+
+# ──────────────────────────────────────────
+# 파일 API  (3-6)
+# ──────────────────────────────────────────
+
+# 진행률 공유 저장소 (file_id -> pct)
+_embedding_progress: dict[int, int] = {}
+
+
+@app.get("/api/files")
+async def api_get_files():
+    files = get_all_file_links()
+    return {"files": files}
+
+
+@app.get("/api/files/{file_id}")
+async def api_get_file(file_id: int):
+    f = get_file_link(file_id)
+    if not f:
+        raise HTTPException(404, "파일 없음")
+    return f
+
+
+@app.post("/api/files")
+async def api_register_file(body: dict, background: BackgroundTasks):
+    """
+    파일 등록 요청.
+    body: { "path": "/abs/path/to/file", "display_name": "optional" }
+    """
+    path = body.get("path", "")
+    if not path:
+        raise HTTPException(400, "path 필수")
+
+    from pathlib import Path as P
+    if not P(path).exists():
+        raise HTTPException(400, f"파일 없음: {path}")
+
+    config = load_config()
+    display_name = body.get("display_name")
+
+    async def progress_cb(file_id: int, pct: int):
+        _embedding_progress[file_id] = pct
+
+    background.add_task(
+        register_file, path, display_name, config, progress_cb
+    )
+    # 즉시 레코드 생성해서 file_id 반환
+    from core.file_engine import detect_file_type
+    file_type = detect_file_type(path)
+    record = add_file_link(
+        original_path=path,
+        display_name=display_name or P(path).name,
+        file_type=file_type,
+        embedding_status="pending",
+    )
+    return {"file_id": record["id"], "status": "queued"}
+
+
+@app.delete("/api/files/{file_id}")
+async def api_delete_file(file_id: int):
+    delete_file_link(file_id)
+    _embedding_progress.pop(file_id, None)
+    return {"deleted": file_id}
+
+
+@app.get("/api/files/status")
+async def api_file_status():
+    """임베딩 진행률 SSE 스트림."""
+    async def event_gen():
+        while True:
+            if _embedding_progress:
+                yield "data: " + json.dumps(_embedding_progress) + "\n\n"
+            else:
+                yield "data: {}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/files/upload")
+async def api_upload_file(background: BackgroundTasks, file: UploadFile = File(...)):
+    """브라우저에서 파일 업로드 → 임시 저장 → 등록 파이프라인 실행."""
+    upload_dir = Path("storage/uploads_tmp")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    dest = upload_dir / file.filename
+
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    config = load_config()
+
+    # 레코드를 여기서 1회만 생성
+    from core.file_engine import detect_file_type
+    record = add_file_link(
+        original_path=str(dest),
+        display_name=file.filename,
+        file_type=detect_file_type(file.filename),
+        embedding_status="pending",
+    )
+    file_id = record["id"]
+    _embedding_progress[file_id] = 0
+
+    async def progress_cb(fid: int, pct: int):
+        _embedding_progress[fid] = pct
+        if pct >= 100:
+            # 3초 후 진행률 항목 제거 → 뱃지 자동 소멸
+            import asyncio
+            await asyncio.sleep(3)
+            _embedding_progress.pop(fid, None)
+
+    # register_file에 기존 file_id 전달 (내부에서 add_file_link 재호출 안 함)
+    background.add_task(
+        _run_register_file, file_id, str(dest), file.filename, config, progress_cb
+    )
+    return {"file_id": file_id, "status": "queued"}
+
+
+async def _run_register_file(file_id: int, path: str, display_name: str, config: dict, progress_cb):
+    """file_id를 외부에서 받아 register_file 파이프라인 실행 (add_file_link 스킵)."""
+    from core.file_engine import extract_text, chunk_text, embed_chunks, detect_file_type
+    import asyncio
+
+    rag_cfg    = config.get("rag", {})
+    chunk_size = rag_cfg.get("chunk_size", 512)
+    overlap    = rag_cfg.get("chunk_overlap", 64)
+    file_type  = detect_file_type(path)
+
+    try:
+        update_file_link_status(file_id, embedding_status="running")
+        if progress_cb: await progress_cb(file_id, 10)
+
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(None, extract_text, path, file_type)
+        if progress_cb: await progress_cb(file_id, 30)
+
+        chunks = chunk_text(text, chunk_size, overlap)
+        if progress_cb: await progress_cb(file_id, 50)
+
+        if chunks:
+            vectors = await loop.run_in_executor(None, embed_chunks, chunks)
+            if progress_cb: await progress_cb(file_id, 80)
+            chunk_ids = add_chunks(file_id, chunks)
+            add_vectors(chunk_ids, vectors)
+
+        update_file_link_status(file_id, embedding_status="done")
+        if progress_cb: await progress_cb(file_id, 100)
+        logger.info("파일 등록 완료 [file_id=%d]", file_id)
+
+    except Exception as e:
+        update_file_link_status(file_id, embedding_status="error")
+        _embedding_progress.pop(file_id, None)
+        logger.error("파일 등록 실패 [file_id=%d]: %s", file_id, e)
+
+
+# ──────────────────────────────────────────
+# 외부 API CRUD  (4-3)
+# ──────────────────────────────────────────
+from core.database import (
+    add_external_api, get_all_external_apis,
+    get_external_api, update_external_api, delete_external_api,
+)
+
+class ExternalApiCreate(BaseModel):
+    name: str
+    endpoint: str
+    ttl_seconds: int = 3600
+    auth_header: Optional[str] = None
+
+class ExternalApiUpdate(BaseModel):
+    name: Optional[str] = None
+    endpoint: Optional[str] = None
+    ttl_seconds: Optional[int] = None
+    auth_header: Optional[str] = None
+
+
+@app.get("/api/external-apis")
+async def api_get_external_apis():
+    return {"apis": get_all_external_apis()}
+
+
+@app.post("/api/external-apis")
+async def api_create_external_api(body: ExternalApiCreate):
+    record = add_external_api(
+        name=body.name,
+        endpoint=body.endpoint,
+        ttl_seconds=body.ttl_seconds,
+        auth_header=body.auth_header,
+    )
+    return record
+
+
+@app.patch("/api/external-apis/{api_id}")
+async def api_update_external_api(api_id: int, body: ExternalApiUpdate):
+    kwargs = {k: v for k, v in body.dict().items() if v is not None}
+    return update_external_api(api_id, **kwargs)
+
+
+@app.delete("/api/external-apis/{api_id}")
+async def api_delete_external_api(api_id: int):
+    delete_external_api(api_id)
+    return {"deleted": api_id}
+
+
+@app.post("/api/external-apis/{api_id}/test")
+async def api_test_external_api(api_id: int):
+    rec = get_external_api(api_id)
+    if not rec:
+        raise HTTPException(404, "API 없음")
+    import httpx
+    headers = {}
+    if rec.get("auth_header"):
+        headers["Authorization"] = rec["auth_header"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(rec["endpoint"], headers=headers)
+        resp.raise_for_status()
+    return {"status": "ok", "status_code": resp.status_code}
 
 
 def _deep_update(base: dict, updates: dict) -> None:
@@ -317,12 +553,16 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
             response_text = "".join(full_response)
 
-            # DB 저장
+            # <think> 태그 제거 후 DB 저장
+            import re as _re
+            clean_response = _re.sub(
+                r'<think>.*?</think>', '', response_text, flags=_re.DOTALL
+            ).strip()
             add_message(body.session_id, "user", body.message)
-            add_message(body.session_id, "assistant", response_text)
+            add_message(body.session_id, "assistant", clean_response)
 
-            # 컨텍스트 히스토리 갱신
-            ctx.add_exchange(body.message, response_text)
+            # 컨텍스트 히스토리 갱신 (think 제거본으로)
+            ctx.add_exchange(body.message, clean_response)
 
             yield "data: " + json.dumps({
                 "type": "done",

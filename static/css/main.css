@@ -20,7 +20,17 @@
   --text-secondary:   #a09890;
   --text-muted:       #6b6560;
 
-  /* 브랜드 액센트 — vanilla cream */
+  /* Gradient animation palette — ice cream flavors */
+  --grad-bg1:        #ffffff;   /* deep base */
+  --grad-bg2:        #f0ece3;   /* deep blue base */
+  --grad-c1: rgb(232, 201, 122);    /* vanilla gold */
+  --grad-c2: rgb(190, 120, 240);    /* lavender blueberry */
+  --grad-c3: rgb(245, 140, 149);    /* strawberry rose */
+  --grad-c4: rgb(100, 220, 185);    /* mint green */
+  --grad-c5: rgb(130, 185, 255);    /* blueberry blue */
+  --grad-c6: rgb(255, 165, 100);    /* mango peach */
+
+  /* 기존 */
   --accent:           #e8c97a;
   --accent-hover:     #f0d88e;
   --accent-dim:       rgba(232, 201, 122, 0.12);

@@ -141,11 +141,23 @@ function createChatItem(session) {
 // ──────────────────────────────────────
 const datahubBadge = document.getElementById('datahub-badge');
 
-function setDatahubBadge(state) {
-  // state: 'running' | 'done' | 'error' | 'hidden'
+function setDatahubBadge(state, tooltip) {
   datahubBadge.className = 'badge';
-  if (state === 'hidden') return;
+  const btn = document.getElementById('btn-datahub');
+  if (state === 'hidden') {
+    if (btn) btn.removeAttribute('data-tooltip');
+    return;
+  }
   datahubBadge.classList.add('visible', state);
+  if (btn && tooltip) btn.setAttribute('data-tooltip', tooltip);
+  else if (btn) {
+    const labels = {
+      running: '임베딩 진행 중...',
+      done:    '임베딩 완료',
+      error:   '오류 발생 — 클릭하여 확인',
+    };
+    btn.setAttribute('data-tooltip', labels[state] || '');
+  }
 }
 
 // ──────────────────────────────────────

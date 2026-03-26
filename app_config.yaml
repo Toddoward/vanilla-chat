@@ -6,7 +6,7 @@ app:
 models:
   response: qwen3.5:4b          # 텍스트 생성 모델
   vision: qwen3.5:4b            # 이미지/문서 VLM (response와 동일 시 인스턴스 공유)
-  embedding: bge-m3:latest      # Dense + Sparse + Multi-vector 임베딩 (Ollama)
+  embedding: bge-m3             # Dense + Sparse + Multi-vector 임베딩 (Ollama)
   reranker: bge-reranker-v2-m3  # RAG 결과 재순위 (FlagEmbedding 라이브러리)
 
 context:
