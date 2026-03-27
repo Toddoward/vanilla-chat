@@ -14,6 +14,22 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 
+def _parse_capabilities(show_data: dict) -> dict:
+    """
+    Ollama /api/show 응답에서 capabilities 파싱.
+    반환: { "thinking": bool, "vision": bool, "tools": bool }
+    """
+    caps_list = show_data.get("capabilities", [])
+    # /api/show REST 응답은 capabilities 배열로 반환
+    # e.g. ["completion", "vision", "thinking", "tools"]
+    caps_set = {c.lower() for c in caps_list}
+    return {
+        "thinking": "thinking" in caps_set,
+        "vision":   "vision"   in caps_set,
+        "tools":    "tools"    in caps_set,
+    }
+
+
 # ──────────────────────────────────────────
 # 추상 인터페이스
 # ──────────────────────────────────────────
@@ -22,7 +38,8 @@ class BaseProvider(ABC):
 
     @abstractmethod
     async def chat(self, messages: list[dict], stream: bool = True, think: bool = True, inference_config: dict | None = None) -> AsyncGenerator[str, None]:
-        """텍스트 생성. stream=True 시 토큰 단위로 yield."""
+        """텍스트 생성. stream=True 시 토큰 단위로 yield.
+        think: inference_config 기반으로 활성화. 모델 capabilities에 따라 조건부 전달됨."""
         ...
 
     @abstractmethod
@@ -45,31 +62,80 @@ class BaseProvider(ABC):
 # Ollama Provider
 # ──────────────────────────────────────────
 
+# 공통 파라미터 — 거의 모든 Ollama 모델이 지원하는 options 키
+COMMON_OPTIONS = {
+    "temperature", "num_predict", "top_p", "repeat_penalty",
+    "top_k", "seed", "tfs_z", "typical_p", "mirostat",
+    "mirostat_tau", "mirostat_eta", "penalize_newline",
+}
+
+
 class OllamaProvider(BaseProvider):
 
     def __init__(self, model_name: str):
         self.model_name = model_name
         self.base_url = OLLAMA_BASE_URL
+        # 모델 capabilities 캐시 — get_model_capabilities()로 채워짐
+        # { "think": None | "bool" | "enum", "think_values": None | ["high","medium","low"] }
+        self._capabilities: dict | None = None
 
-    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True, inference_config: dict | None = None) -> AsyncGenerator[str, None]:
+    async def get_capabilities(self) -> dict:
+        """Ollama /api/show에서 모델 capabilities 조회. 결과 캐싱."""
+        if self._capabilities is not None:
+            return self._capabilities
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/show",
+                    json={"name": self.model_name}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            caps = _parse_capabilities(data)
+            self._capabilities = caps
+            logger.info("모델 capabilities [%s]: %s", self.model_name, caps)
+        except Exception as e:
+            logger.warning("capabilities 조회 실패 [%s]: %s", self.model_name, e)
+            self._capabilities = {"thinking": False, "vision": False, "tools": False}
+
+        return self._capabilities
+
+    async def chat(
+        self,
+        messages: list[dict],
+        stream: bool = True,
+        think: bool = True,
+        inference_config: dict | None = None,
+    ) -> AsyncGenerator[str, None]:
         cfg = inference_config or {}
-        options = {
-            "temperature":    cfg.get("temperature",    0.6),
-            "num_predict":    cfg.get("num_predict",    2048),
-            "top_p":          cfg.get("top_p",          0.9),
-            "repeat_penalty": cfg.get("repeat_penalty", 1.1),
+
+        # 공통 파라미터만 options로 추출 (pass-through)
+        options = {k: v for k, v in cfg.items() if k in COMMON_OPTIONS}
+        # 기본값 보장
+        options.setdefault("temperature",    0.6)
+        options.setdefault("num_predict",    2048)
+        options.setdefault("top_p",          0.9)
+        options.setdefault("repeat_penalty", 1.1)
+
+        # think 파라미터: capabilities 확인 후 조건부 최상단 레벨 전달
+        payload: dict = {
+            "model":    self.model_name,
+            "messages": messages,
+            "stream":   stream,
+            "options":  options,
         }
+        caps = await self.get_capabilities()
+        if caps.get("thinking"):
+            payload["think"] = bool(think)  # True/False 모두 명시적 전달
+        # think_cap == None 이면 payload에 think 미포함
+
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/api/chat",
-                json={
-                    "model":    self.model_name,
-                    "messages": messages,
-                    "stream":   stream,
-                    "think":    think,
-                    "options":  options,
-                }
+                json=payload,
             ) as response:
                 response.raise_for_status()
                 import json
@@ -80,7 +146,6 @@ class OllamaProvider(BaseProvider):
                         data = json.loads(line)
                         msg = data.get("message", {})
 
-                        # thinking 필드: Ollama가 별도로 반환
                         thinking_chunk = msg.get("thinking", "")
                         if thinking_chunk:
                             if not thinking_started:
@@ -88,7 +153,6 @@ class OllamaProvider(BaseProvider):
                                 thinking_started = True
                             yield thinking_chunk
 
-                        # thinking 종료 후 content 시작 시점에 닫기 태그 삽입
                         content_chunk = msg.get("content", "")
                         if content_chunk:
                             if thinking_started and not thinking_ended:
@@ -97,7 +161,6 @@ class OllamaProvider(BaseProvider):
                             yield content_chunk
 
                         if data.get("done"):
-                            # done인데 thinking만 있고 content 없는 경우 닫기
                             if thinking_started and not thinking_ended:
                                 yield "</think>"
                             break

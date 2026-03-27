@@ -198,6 +198,15 @@ async def get_models():
     return {"models": models}
 
 
+@app.get("/api/models/capabilities")
+async def get_model_capabilities(model: str):
+    """특정 모델의 capabilities 조회 (thinking/vision/tools 지원 여부)."""
+    from core.providers import OllamaProvider
+    provider = OllamaProvider(model)
+    caps = await provider.get_capabilities()
+    return {"model": model, **caps}
+
+
 @app.get("/api/config")
 async def get_config():
     """현재 app_config.yaml 반환."""
@@ -212,7 +221,8 @@ async def patch_config(updates: dict):
     save_config(config)
     app.state.config = config
     model_manager.init(config)
-    return {"ok": True, "config": config}
+    note = "모델 변경은 새 채팅부터 적용됩니다." if "models" in updates else None
+    return {"ok": True, "config": config, "note": note}
 
 
 # ──────────────────────────────────────────
@@ -640,8 +650,11 @@ async def _generate_title(session_id: int, user_msg: str, assistant_msg: str, co
         ):
             result.append(chunk)
 
-        title = "".join(result).strip().strip('"\'').strip()[:20]
-        # <think> 태그 포함 시 제거
+        title = "".join(result).strip().strip('"\'').strip()
+        # </think> 태그가 있으면 그 이후 텍스트만 사용
+        if '</think>' in title:
+            title = title.split('</think>')[-1].strip()
+        # 혹시 남은 <think> 태그 제거
         import re
         title = re.sub(r'<think>.*?</think>', '', title, flags=re.DOTALL).strip()[:20]
 

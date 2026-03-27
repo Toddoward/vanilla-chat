@@ -102,11 +102,20 @@ async function initApp() {
     console.warn('config 로드 실패:', e);
   }
 
-  // 모델 연결 상태 주기적 갱신
+  navigateTo('chat');
+
+  // 모델 연결 상태 — navigateTo 이후 호출해야 model_manager 초기화 완료 시점
   refreshModelStatus();
   setInterval(refreshModelStatus, 30000);
 
-  navigateTo('chat');
+  // Settings에서 모델 변경 시 즉시 갱신
+  document.addEventListener('model:changed', () => {
+    const dot  = document.querySelector('.status-dot');
+    const text = document.querySelector('#status-text');
+    if (dot)  dot.style.background = 'var(--warning)';
+    if (text) text.textContent = '연결 중...';
+    refreshModelStatus();
+  });
 }
 
 async function refreshModelStatus() {

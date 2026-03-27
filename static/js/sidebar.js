@@ -10,15 +10,48 @@ import { getDateGroupLabel, applyFavStyle, onReady } from './utils.js';
 // ──────────────────────────────────────
 // 사이드바 토글
 // ──────────────────────────────────────
+function _applyBtnLabels(visible) {
+  document.querySelectorAll('.btn-label').forEach(el => {
+    el.style.display = visible ? '' : 'none';
+  });
+}
+
 export function toggleSidebar() {
+  // 좁은 화면에서는 확장 차단
+  if (window.innerWidth <= 768) return;
   const sidebar = document.getElementById('sidebar');
   sidebar.classList.toggle('collapsed');
   document.body.classList.toggle('sidebar-collapsed');
+  const isCollapsed = sidebar.classList.contains('collapsed');
+  _applyBtnLabels(!isCollapsed);
   const label = document.querySelector('#btn-toggle .btn-label');
-  if (label) label.textContent = sidebar.classList.contains('collapsed') ? '' : '접기';
+  if (label) label.textContent = isCollapsed ? '' : '접기';
 }
 
 document.getElementById('btn-toggle')?.addEventListener('click', toggleSidebar);
+
+// 화면 폭 변화 자동 감지 — 좁아지면 collapse, 넓어지면 restore
+const _mq = window.matchMedia('(max-width: 768px)');
+function _handleBreakpoint(e) {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  if (e.matches) {
+    // 좁아짐 → collapse
+    sidebar.classList.add('collapsed');
+    document.body.classList.add('sidebar-collapsed');
+    _applyBtnLabels(false);
+  } else {
+    // 넓어짐 → restore
+    sidebar.classList.remove('collapsed');
+    document.body.classList.remove('sidebar-collapsed');
+    _applyBtnLabels(true);
+    const label = document.querySelector('#btn-toggle .btn-label');
+    if (label) label.textContent = '접기';
+  }
+}
+_mq.addEventListener('change', _handleBreakpoint);
+// 초기 상태 즉시 적용
+_handleBreakpoint(_mq);
 
 // ──────────────────────────────────────
 // 채팅 목록 로드 + 렌더링

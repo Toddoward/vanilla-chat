@@ -1,57 +1,74 @@
 app:
-  name: "Vanilla Chat"           # 헤더/탭에 표시될 앱 이름
-  logo: "static/images/logo_color.png"  # 단일 로고 경로
-  logo_emoji_fallback: "🍨"     # 로고 파일 없을 시 표시할 이모지
-
-models:
-  response: qwen3.5:0.8b          # 텍스트 생성 모델
-  vision: qwen3.5:0.8b            # 이미지/문서 VLM (response와 동일 시 인스턴스 공유)
-  embedding: bge-m3             # Dense + Sparse + Multi-vector 임베딩 (Ollama)
-  reranker: bge-reranker-v2-m3  # RAG 결과 재순위 (FlagEmbedding 라이브러리)
-
-inference:
-  think: false                   # Qwen3 thinking mode 활성화 여부
-  temperature: 0.6              # 생성 다양성 (Qwen3 권장: 0.6)
-  num_predict: 2048             # 최대 생성 토큰 수 (thinking 포함)
-  top_p: 0.9                    # 누적 확률 기반 샘플링
-  repeat_penalty: 1.1           # 반복 억제 (과도한 재확인 방지)
-
+  logo: static/images/logo_color.png
+  logo_emoji_fallback: 🍨
+  name: Vanilla Chat
 context:
-  user_input_ratio: 0.20      # 전체 컨텍스트 중 사용자 입력 할당 비율
-  summary_trigger: 0.80       # 이 비율 도달 시 백그라운드 요약 트리거
-
-rag:
-  chunk_size: 512
-  chunk_overlap: 64
-  top_k: 5
-
-file_links:
-  verify_interval_minutes: 10  # 파일 경로 백그라운드 검증 주기
-
+  summary_trigger: 0.8
+  user_input_ratio: 0.2
 extensions:
-  collector: false             # 외부 API 온디맨드 수집 활성화 여부
-  cloud_providers: false       # 클라우드 AI 연동 활성화 여부
+  cloud_providers: false
+  collector: false
+file_links:
+  verify_interval_minutes: 10
+inference:
+  model_overrides: {}
+  num_predict: 2048
+  repeat_penalty: 1.1
+  temperature: 0.6
+  think: false
+  top_p: 0.9
+models:
+  embedding: bge-m3
+  reranker: bge-reranker-v2-m3
+  response: gemma3:4b
+  vision: gemma3:4b
+rag:
+  chunk_overlap: 64
+  chunk_size: 512
+  top_k: 5
+system_prompt: 'You are $(name), a personal AI assistant running locally on the user''s
+  machine.
 
-system_prompt: |
-  You are $(name), a personal AI assistant running locally on the user's machine.
-  Your name in the user's language should be pronounced naturally (e.g. translate the name phonetically to match the user's language).
+  Your name in the user''s language should be pronounced naturally (e.g. translate
+  the name phonetically to match the user''s language).
+
 
   ## Architecture
+
   You are connected to the following local systems:
-  - A local file storage registry (file_links): users can register files from their filesystem.
+
+  - A local file storage registry (file_links): users can register files from their
+  filesystem.
+
   - A SQLite database with full-text search (FTS5) and vector search (sqlite-vec).
-  - A RAG (Retrieval-Augmented Generation) pipeline: registered files are chunked, embedded, and searchable.
+
+  - A RAG (Retrieval-Augmented Generation) pipeline: registered files are chunked,
+  embedded, and searchable.
+
 
   ## Your Role
-  - You are NOT just a conversational assistant. You actively help users manage, search, and retrieve information from their local files and registered data.
-  - When a user asks about a file, document, or stored data, assume the RAG system may have relevant results and mention it naturally.
-  - When a user uploads or registers a file, acknowledge it and explain that it will be embedded for future search.
+
+  - You are NOT just a conversational assistant. You actively help users manage, search,
+  and retrieve information from their local files and registered data.
+
+  - When a user asks about a file, document, or stored data, assume the RAG system
+  may have relevant results and mention it naturally.
+
+  - When a user uploads or registers a file, acknowledge it and explain that it will
+  be embedded for future search.
+
   - Be concise, friendly, and practical.
 
+
   ## Reasoning
+
   - Keep your reasoning steps brief and focused.
+
   - Do NOT repeat the same conclusion multiple times.
+
   - Limit final verification to ONE step only.
 
+
   ## Language
-  - Always respond in the same language the user uses.
+
+  - Always respond in the same language the user uses.'

@@ -477,4 +477,7 @@ body.sidebar-collapsed #header {
   #main {
     margin-left: var(--sidebar-collapsed-width);
   }
+  #header {
+    padding-left: var(--sidebar-collapsed-width);
+  }
 }
