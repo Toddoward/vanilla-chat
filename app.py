@@ -228,16 +228,30 @@ async def api_get_files():
     return {"files": files}
 
 
+@app.get("/api/files/status")
+async def api_file_status():
+    """임베딩 진행률 SSE 스트림."""
+    async def event_gen():
+        while True:
+            if _embedding_progress:
+                yield "data: " + json.dumps(_embedding_progress) + "\n\n"
+            else:
+                yield "data: {}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/files/{file_id}")
 async def api_get_file(file_id: int):
     f = get_file_link(file_id)
     if not f:
         raise HTTPException(404, "파일 없음")
     return f
-
-
-@app.post("/api/files")
-async def api_register_file(body: dict, background: BackgroundTasks):
     """
     파일 등록 요청.
     body: { "path": "/abs/path/to/file", "display_name": "optional" }
@@ -276,24 +290,6 @@ async def api_delete_file(file_id: int):
     delete_file_link(file_id)
     _embedding_progress.pop(file_id, None)
     return {"deleted": file_id}
-
-
-@app.get("/api/files/status")
-async def api_file_status():
-    """임베딩 진행률 SSE 스트림."""
-    async def event_gen():
-        while True:
-            if _embedding_progress:
-                yield "data: " + json.dumps(_embedding_progress) + "\n\n"
-            else:
-                yield "data: {}\n\n"
-            await asyncio.sleep(1)
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.post("/api/files/upload")
@@ -517,7 +513,11 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
         raise HTTPException(404, "세션 없음")
 
     config = load_config()
+    app_name      = config.get("app", {}).get("name", "Vanilla Chat")
     system_prompt = config.get("system_prompt", "You are a helpful assistant.")
+    system_prompt = system_prompt.replace("$(name)", app_name)
+    inference_config = config.get("inference", {})
+    think_enabled    = inference_config.get("think", True)
     provider = model_manager.get("response")
 
     ctx = get_context_manager(
@@ -547,7 +547,11 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
             # 스트리밍 응답
             yield "data: " + json.dumps({"type": "start"}) + "\n\n"
 
-            async for chunk in provider.chat(messages_updated, stream=True):
+            async for chunk in provider.chat(
+                messages_updated, stream=True,
+                think=think_enabled,
+                inference_config=inference_config,
+            ):
                 full_response.append(chunk)
                 yield "data: " + json.dumps({"type": "chunk", "content": chunk}) + "\n\n"
 
@@ -610,6 +614,7 @@ async def _generate_title(session_id: int, user_msg: str, assistant_msg: str, co
             [{"role": "user", "content": prompt}],
             stream=True,
             think=False,
+            inference_config={"temperature": 0.3, "num_predict": 64},
         ):
             result.append(chunk)
 

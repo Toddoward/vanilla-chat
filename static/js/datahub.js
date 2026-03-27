@@ -12,21 +12,18 @@ var dhStatusStream   = null;
 var dhEmbedProgress  = {};  // file_id -> pct
 
 // ──────────────────────────────────────
-// 초기화 — 레이아웃은 DOMContentLoaded에서 1회만, 데이터는 page:enter마다
+// 초기화 — 레이아웃은 DOMContentLoaded에서 1회만, SSE는 항상 유지
 // ──────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function() {
   renderDataHub();
+  startEmbedStatusStream();  // 앱 시작 시 전역 유지 (페이지 이동과 무관)
 });
 
 document.addEventListener('page:enter', function(e) {
-  if (e.detail.page !== 'datahub') {
-    stopEmbedStatusStream();
-    return;
-  }
+  if (e.detail.page !== 'datahub') return;
   // 레이아웃은 이미 렌더링됨. 데이터만 로드
   if (dhCurrentTab === 'files') loadFiles();
   if (dhCurrentTab === 'apis')  loadApis();
-  startEmbedStatusStream();
 });
 
 // ──────────────────────────────────────
@@ -254,15 +251,29 @@ function startEmbedStatusStream() {
   dhStatusStream.onmessage = function(e) {
     try {
       var progress = JSON.parse(e.data);
-      var changed  = false;
+      var keys = Object.keys(progress);
+
+      // 진행 항목이 없으면 뱃지 숨김
+      if (!keys.length) {
+        setDatahubBadge('hidden');
+        return;
+      }
+
+      var changed = false;
       for (var id in progress) {
         if (dhEmbedProgress[id] !== progress[id]) { changed = true; }
         dhEmbedProgress[id] = progress[id];
       }
       if (changed) refreshFileProgress();
-      // 모두 100%면 뱃지 done
-      var allDone = Object.values(progress).every(function(p) { return p >= 100; });
-      setDatahubBadge(allDone ? 'done' : 'running');
+
+      // 모두 100%면 done 뱃지 → 3초 후 hidden
+      var allDone = keys.every(function(k) { return progress[k] >= 100; });
+      if (allDone) {
+        setDatahubBadge('done');
+        setTimeout(function() { setDatahubBadge('hidden'); }, 3000);
+      } else {
+        setDatahubBadge('running');
+      }
     } catch(e2) {}
   };
 }
@@ -272,24 +283,28 @@ function stopEmbedStatusStream() {
 }
 
 function refreshFileProgress() {
-  // 진행 중인 파일의 뱃지만 업데이트 (전체 재렌더 아님)
+  var completedAny = false;
   document.querySelectorAll('.dh-file-row').forEach(function(row) {
     var id  = parseInt(row.dataset.fileId);
     var pct = dhEmbedProgress[id];
-    if (pct !== undefined && pct < 100) {
-      var badge = row.querySelector('.dh-badge');
-      if (badge) {
-        badge.className = 'dh-badge running';
-        badge.textContent = '🟡 임베딩 중... ' + pct + '%';
-      }
-    } else if (pct === 100) {
-      var badge2 = row.querySelector('.dh-badge');
-      if (badge2 && badge2.classList.contains('running')) {
-        badge2.className = 'dh-badge done';
-        badge2.textContent = '✅ 완료';
+    if (pct === undefined) return;
+    var badge = row.querySelector('.dh-badge');
+    if (!badge) return;
+    if (pct < 100) {
+      badge.className   = 'dh-badge running';
+      badge.textContent = '🟡 임베딩 중... ' + pct + '%';
+    } else {
+      // pct === 100: 클래스 무관하게 완료로 갱신
+      if (!badge.classList.contains('done')) {
+        badge.className   = 'dh-badge done';
+        badge.textContent = '✅ 완료';
+        completedAny = true;
       }
     }
   });
+  if (completedAny) {
+    setTimeout(function() { loadFiles(); }, 1500);
+  }
 }
 
 // ──────────────────────────────────────

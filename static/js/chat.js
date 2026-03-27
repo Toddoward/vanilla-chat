@@ -288,6 +288,9 @@ async function loadSession(sessionId) {
     var data = await api('GET', '/api/sessions/' + sessionId);
     currentSessionId = sessionId;
     App.currentSessionId = sessionId;
+    // 새 채팅 버튼 active 해제
+    var newChatBtn = document.getElementById('btn-new-chat');
+    if (newChatBtn) newChatBtn.classList.remove('active');
     var el = document.getElementById('chat-messages');
     el.innerHTML = '';
     setHeaderChatTitle(data.title && data.title !== '새 대화' ? data.title : '');
@@ -612,17 +615,10 @@ async function sendMessage() {
         if (!thinkPanel && isActive) {
           thinkPanel = createThinkingPanel();
           thinkPanel.classList.add('thinking-active');
-          // message-wrap.assistant 형태로 래핑 → 버블과 동일 너비
-          var tWrap = document.createElement('div');
-          tWrap.className = 'message-wrap assistant thinking-wrap';
-          var tSlot = document.createElement('div');
-          tSlot.className = 'bubble-logo-slot';
-          tWrap.appendChild(tSlot);
-          tWrap.appendChild(thinkPanel);
           var ind = document.getElementById('logo-indicator-wrap');
           var msgs = document.getElementById('chat-messages');
-          if (ind) ind.before(tWrap);
-          else if (msgs) msgs.appendChild(tWrap);
+          if (ind) ind.before(thinkPanel);
+          else if (msgs) msgs.appendChild(thinkPanel);
           st._panel = thinkPanel;
           var lbl = document.getElementById('indicator-label');
           if (lbl) lbl.remove();
@@ -682,12 +678,26 @@ async function regenerateLast() {
 
 function setStreamingMode(active) {
   isStreaming = active;
-  var send = document.getElementById('send-btn');
-  var stop = document.getElementById('stop-btn');
-  var inp  = document.getElementById('chat-input');
+  var send      = document.getElementById('send-btn');
+  var stop      = document.getElementById('stop-btn');
+  var inp       = document.getElementById('chat-input');
+  var attachBtn = document.getElementById('attach-btn');
+  var fileInput = document.getElementById('file-input');
+
   if (send) send.style.display = active ? 'none' : 'flex';
   if (stop) stop.style.display = active ? 'flex' : 'none';
-  if (inp)  inp.disabled = active;
+  if (inp) {
+    inp.disabled = active;
+    inp.placeholder = active
+      ? '응답 생성 중... (완료 후 입력 가능합니다)'
+      : '메시지를 입력하세요...';
+  }
+  if (attachBtn) {
+    attachBtn.style.opacity       = active ? '0.35' : '1';
+    attachBtn.style.pointerEvents = active ? 'none'  : 'auto';
+    attachBtn.style.cursor        = active ? 'not-allowed' : 'pointer';
+  }
+  if (fileInput) fileInput.disabled = active;
 }
 
 function setupInputEvents() {
@@ -716,7 +726,7 @@ function scrollToBottom() {
 // CSS
 // ──────────────────────────────────────
 var chatCSS =
-'#page-chat{display:flex;flex-direction:column;height:100%;overflow:hidden;}' +
+'#page-chat.active{display:flex;flex-direction:column;height:100%;overflow:hidden;}' +
 '#chat-messages{flex:1;overflow-y:auto;padding:24px 20px 8px;display:flex;flex-direction:column;gap:0;}' +
 
 /* Greeting */
@@ -733,8 +743,7 @@ var chatCSS =
 '@keyframes title-blink{0%,100%{opacity:1;}50%{opacity:0.2;}}' +
 
 /* 말풍선 래퍼 */
-'.message-wrap.thinking-wrap{margin-bottom:4px;}' +
-'.message-wrap{display:flex;flex-direction:row;align-items:flex-start;max-width:760px;position:relative;gap:0;margin-bottom:32px;}' +
+'.message-wrap{display:flex;flex-direction:row;align-items:flex-start;max-width:760px;position:relative;gap:0;padding-bottom:32px;}' +
 '.message-wrap.user{align-self:flex-end;flex-direction:row-reverse;}' +
 '.message-wrap.assistant{align-self:flex-start;}' +
 
@@ -757,15 +766,14 @@ var chatCSS =
 /* 액션 버튼 — absolute, 레이아웃 영향 없음 */
 '.msg-actions{' +
   'position:absolute;' +
-  'bottom:-28px;left:34px;' +
+  'bottom:4px;left:34px;' +
   'display:flex;gap:4px;' +
   'opacity:0;pointer-events:none;' +
   'transition:opacity 0.15s;' +
   'z-index:10;' +
 '}' +
 '.message-wrap.user .msg-actions{left:auto;right:0;}' +
-'.message-wrap:hover .msg-actions,' +
-'.msg-actions:hover{opacity:1;pointer-events:auto;}' +
+'.message-wrap:hover .msg-actions{opacity:1;pointer-events:auto;}' +
 '.msg-action-btn{padding:3px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-muted);font-size:var(--font-size-xs);cursor:pointer;transition:all 0.15s;white-space:nowrap;}' +
 '.msg-action-btn:hover{color:var(--text-primary);border-color:var(--accent);}' +
 
@@ -842,37 +850,34 @@ var chatCSS =
 
 /* 추론 패널 */
 '.thinking-panel{' +
-  'width:100%;' +
-  'border:none;' +
-  'background:none;' +
-  'margin:0 0 4px 0;' +
-  'overflow:visible;' +
+  'width:100%;max-width:760px;' +
+  'align-self:flex-start;' +
+  'border:none;background:none;' +
+  'margin:0 0 8px 34px;' +
+  'box-sizing:border-box;' +
 '}' +
-'.thinking-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;color:var(--text-muted);font-size:var(--font-size-xs);background:none;border:none;text-align:left;}' +
+'.thinking-toggle{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;color:var(--text-muted);font-size:var(--font-size-xs);background:none;border:none;text-align:left;}' +
 '.thinking-toggle:hover{color:var(--text-secondary);}' +
-'.thinking-icon{font-size:13px;flex-shrink:0;}' +
-'.thinking-label{flex:1;font-weight:500;}' +
-'.thinking-chevron{font-size:16px;color:var(--text-muted);transition:transform 0.2s;display:inline-block;}' +
+'.thinking-icon{font-size:12px;flex-shrink:0;}' +
+'.thinking-label{font-weight:500;}' +
+'.thinking-chevron{font-size:14px;color:var(--text-muted);transition:transform 0.2s;display:inline-block;margin-left:2px;}' +
 '.thinking-panel:not(.collapsed) .thinking-chevron{transform:rotate(90deg);}' +
 '.thinking-panel.thinking-active .thinking-icon{animation:think-pulse 1.2s ease-in-out infinite;}' +
 '@keyframes think-pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}' +
 '.thinking-content{' +
-  'max-height:0;' +
-  'overflow:hidden;' +
-  'transition:max-height 0.3s ease;' +
+  'height:0;overflow:hidden;' +
+  'transition:height 0.25s ease;' +
 '}' +
 '.thinking-panel:not(.collapsed) .thinking-content{' +
-  'max-height:300px;' +
-  'overflow-y:auto;' +
+  'height:auto;max-height:280px;overflow-y:auto;' +
 '}' +
 '.thinking-content pre{' +
-  'margin:0;padding:8px 0;' +
+  'margin:6px 0 0;padding:0;' +
   'font-family:var(--font-mono);' +
   'font-size:var(--font-size-xs);' +
   'color:var(--text-muted);' +
-  'white-space:pre-wrap;' +
-  'word-break:break-word;' +
-  'line-height:1.6;' +
+  'white-space:pre-wrap;word-break:break-word;line-height:1.6;' +
+  'background:none;border:none;' +
 '}' +
 
 /* 파일 첨부 칩 */

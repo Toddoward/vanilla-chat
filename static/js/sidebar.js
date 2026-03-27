@@ -131,6 +131,9 @@ function createChatItem(session) {
     // 활성 항목 표시
     document.querySelectorAll('.chat-item').forEach(i => i.classList.remove('active'));
     el.classList.add('active');
+    // 새 채팅 버튼 active 해제 (기존 채팅 로드이므로)
+    const newChatBtn = document.getElementById('btn-new-chat');
+    if (newChatBtn) newChatBtn.classList.remove('active');
   });
 
   return el;
@@ -142,12 +145,14 @@ function createChatItem(session) {
 const datahubBadge = document.getElementById('datahub-badge');
 
 function setDatahubBadge(state, tooltip) {
-  datahubBadge.className = 'badge';
   const btn = document.getElementById('btn-datahub');
+  datahubBadge.className = 'badge';
   if (state === 'hidden') {
+    datahubBadge.style.display = 'none';
     if (btn) btn.removeAttribute('data-tooltip');
     return;
   }
+  datahubBadge.style.display = '';
   datahubBadge.classList.add('visible', state);
   if (btn && tooltip) btn.setAttribute('data-tooltip', tooltip);
   else if (btn) {

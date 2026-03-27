@@ -21,7 +21,7 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 class BaseProvider(ABC):
 
     @abstractmethod
-    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True) -> AsyncGenerator[str, None]:
+    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True, inference_config: dict | None = None) -> AsyncGenerator[str, None]:
         """텍스트 생성. stream=True 시 토큰 단위로 yield."""
         ...
 
@@ -51,16 +51,24 @@ class OllamaProvider(BaseProvider):
         self.model_name = model_name
         self.base_url = OLLAMA_BASE_URL
 
-    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True) -> AsyncGenerator[str, None]:
+    async def chat(self, messages: list[dict], stream: bool = True, think: bool = True, inference_config: dict | None = None) -> AsyncGenerator[str, None]:
+        cfg = inference_config or {}
+        options = {
+            "temperature":    cfg.get("temperature",    0.6),
+            "num_predict":    cfg.get("num_predict",    2048),
+            "top_p":          cfg.get("top_p",          0.9),
+            "repeat_penalty": cfg.get("repeat_penalty", 1.1),
+        }
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/api/chat",
                 json={
-                    "model": self.model_name,
+                    "model":    self.model_name,
                     "messages": messages,
-                    "stream": stream,
-                    "think": think,        # Qwen3 thinking — 최상단 레벨
+                    "stream":   stream,
+                    "think":    think,
+                    "options":  options,
                 }
             ) as response:
                 response.raise_for_status()
