@@ -4,13 +4,13 @@ app:
   logo_emoji_fallback: "🍨"     # 로고 파일 없을 시 표시할 이모지
 
 models:
-  response: qwen3.5:4b          # 텍스트 생성 모델
-  vision: qwen3.5:4b            # 이미지/문서 VLM (response와 동일 시 인스턴스 공유)
+  response: qwen3.5:0.8b          # 텍스트 생성 모델
+  vision: qwen3.5:0.8b            # 이미지/문서 VLM (response와 동일 시 인스턴스 공유)
   embedding: bge-m3             # Dense + Sparse + Multi-vector 임베딩 (Ollama)
   reranker: bge-reranker-v2-m3  # RAG 결과 재순위 (FlagEmbedding 라이브러리)
 
 inference:
-  think: true                   # Qwen3 thinking mode 활성화 여부
+  think: false                   # Qwen3 thinking mode 활성화 여부
   temperature: 0.6              # 생성 다양성 (Qwen3 권장: 0.6)
   num_predict: 2048             # 최대 생성 토큰 수 (thinking 포함)
   top_p: 0.9                    # 누적 확률 기반 샘플링

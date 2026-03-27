@@ -1,3 +1,9 @@
+import { App, api } from './app.js';
+import { setDatahubBadge } from './sidebar.js';
+import { onReady, showToast, getFileIcon, escapeHtml, updateBulkActions } from './utils.js';
+
+
+
 /**
  * static/js/datahub.js
  * Data Hub UI — 파일 관리 탭 + 외부 API 관리 탭
@@ -14,7 +20,7 @@ var dhEmbedProgress  = {};  // file_id -> pct
 // ──────────────────────────────────────
 // 초기화 — 레이아웃은 DOMContentLoaded에서 1회만, SSE는 항상 유지
 // ──────────────────────────────────────
-document.addEventListener('DOMContentLoaded', function() {
+onReady(function() {
   renderDataHub();
   startEmbedStatusStream();  // 앱 시작 시 전역 유지 (페이지 이동과 무관)
 });
@@ -146,7 +152,7 @@ function renderFileList(files) {
   var list = document.getElementById('dh-file-list');
   if (!list) return;
   dhSelectedFiles.clear();
-  updateBulkActions();
+  updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
 
   if (!files.length) {
     list.innerHTML = '<div class="dh-empty">등록된 파일이 없습니다.<br>파일을 드래그하거나 선택해 등록하세요.</div>';
@@ -178,7 +184,7 @@ function renderFileList(files) {
     row.querySelector('.dh-check').addEventListener('change', function(e) {
       if (e.target.checked) dhSelectedFiles.add(f.id);
       else dhSelectedFiles.delete(f.id);
-      updateBulkActions();
+      updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
     });
 
     // 삭제
@@ -206,18 +212,6 @@ function getStatusBadge(f, pct) {
   if (f.embedding_status === 'done')    return '<span class="dh-badge done">✅ 완료</span>';
   if (f.embedding_status === 'error')   return '<span class="dh-badge error">❌ 오류</span>';
   return '<span class="dh-badge pending">⏳ 대기</span>';
-}
-
-function updateBulkActions() {
-  var bar   = document.getElementById('dh-bulk-actions');
-  var count = document.getElementById('dh-selected-count');
-  if (!bar) return;
-  if (dhSelectedFiles.size > 0) {
-    bar.style.display = 'flex';
-    if (count) count.textContent = dhSelectedFiles.size + '개 선택됨';
-  } else {
-    bar.style.display = 'none';
-  }
 }
 
 async function deleteSelectedFiles() {
@@ -435,15 +429,6 @@ function formatTtl(sec) {
   if (sec < 3600)  return (sec / 60) + '분';
   if (sec < 86400) return (sec / 3600) + '시간';
   return (sec / 86400) + '일';
-}
-
-function getFileIcon(name) {
-  var ext = (name || '').split('.').pop().toLowerCase();
-  if (['png','jpg','jpeg','webp','gif'].includes(ext)) return '🖼';
-  if (ext === 'pdf')  return '📄';
-  if (ext === 'docx') return '📝';
-  if (ext === 'txt' || ext === 'md') return '📃';
-  return '📎';
 }
 
 // ──────────────────────────────────────

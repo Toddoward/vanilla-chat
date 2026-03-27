@@ -25,6 +25,7 @@ from core.database import (
     add_file_link, get_all_file_links, get_file_link,
     update_file_link_status, delete_file_link,
     add_chunks, add_vectors,
+    delete_last_assistant_message,
 )
 from core.providers import (
     model_manager,
@@ -431,6 +432,20 @@ async def api_test_external_api(api_id: int):
     return {"status": "ok", "status_code": resp.status_code}
 
 
+@app.get("/api/search")
+async def api_search(q: str = "", limit: int = 20):
+    """통합 검색 — 채팅 메시지 + 파일 (FTS5)."""
+    from core.database import search_sessions, search_files, get_sessions, get_all_file_links
+    if q.strip():
+        sessions = search_sessions(q, top_k=limit)
+        files    = search_files(q, top_k=limit)
+    else:
+        # 검색어 없으면 최근 채팅/파일 기본 표시
+        sessions = get_sessions()[:limit]
+        files    = get_all_file_links()[:limit]
+    return {"sessions": sessions, "files": files, "query": q}
+
+
 def _deep_update(base: dict, updates: dict) -> None:
     for k, v in updates.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -504,6 +519,7 @@ async def api_delete_sessions(body: SessionDeleteBody):
 class ChatRequest(BaseModel):
     session_id: int
     message: str
+    is_regenerate: bool = False
 
 
 @app.post("/api/chat")
@@ -529,6 +545,13 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
     messages = ctx.build_messages(body.message)
     is_first_message = get_message_count(body.session_id) == 0
+
+    if body.is_regenerate:
+        # 재생성: 마지막 assistant 메시지 삭제, user 메시지 저장 스킵
+        delete_last_assistant_message(body.session_id)
+    else:
+        # 일반: user 메시지 스트리밍 시작 전 즉시 저장
+        add_message(body.session_id, "user", body.message)
 
     async def event_stream():
         full_response = []
@@ -557,12 +580,11 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
             response_text = "".join(full_response)
 
-            # <think> 태그 제거 후 DB 저장
+            # <think> 태그 제거 후 DB 저장 (assistant만)
             import re as _re
             clean_response = _re.sub(
                 r'<think>.*?</think>', '', response_text, flags=_re.DOTALL
             ).strip()
-            add_message(body.session_id, "user", body.message)
             add_message(body.session_id, "assistant", clean_response)
 
             # 컨텍스트 히스토리 갱신 (think 제거본으로)

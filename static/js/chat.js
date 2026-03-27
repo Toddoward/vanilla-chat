@@ -1,29 +1,9 @@
 /**
  * static/js/chat.js — Phase 2 완성본 v3
  */
-
-// ──────────────────────────────────────
-// 마크다운 렌더러
-// ──────────────────────────────────────
-function renderMarkdown(text) {
-  if (!text) return '';
-  var html = escapeHtml(text);
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function(_, lang, code) {
-    return '<pre><code class="lang-' + lang + '">' + code.trim() + '</code></pre>';
-  });
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
-  html = html.replace(/^---$/gm, '<hr>');
-  html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank">$1</a>');
-  html = html.replace(/\n\n/g, '</p><p>');
-  html = html.replace(/\n/g, '<br>');
-  return '<p>' + html + '</p>';
-}
+import { App, navigateTo, api } from './app.js';
+import { loadSidebarChatList, setDatahubBadge } from './sidebar.js';
+import { escapeHtml, renderMarkdown, getFileIcon, showToast, applyFavStyle, onReady } from './utils.js';
 
 // ──────────────────────────────────────
 // Greeting
@@ -46,10 +26,11 @@ function pickGreeting(appState, themeConfig) {
 }
 
 // ──────────────────────────────────────
-// 헤더 채팅 제목
+// 헤더 채팅 제목 + 즐겨찾기
 // ──────────────────────────────────────
+
 function setHeaderChatTitle(title, loading) {
-  var el = document.getElementById('header-chat-title');
+  var el  = document.getElementById('header-chat-title');
   var sep = document.getElementById('header-title-sep');
   if (!el) {
     var left = document.querySelector('.header-left');
@@ -59,8 +40,17 @@ function setHeaderChatTitle(title, loading) {
     sep.textContent = '/';
     el = document.createElement('span');
     el.id = 'header-chat-title';
+    // 즐겨찾기 버튼 — 제목 오른쪽
+    var favBtn = document.createElement('button');
+    favBtn.id = 'header-fav-btn';
+    favBtn.title = '즐겨찾기';
+    favBtn.className = 'fav-icon-el';
+    favBtn.style.cssText = 'display:none;width:16px;height:16px;padding:0;border:none;cursor:pointer;background:none;vertical-align:middle;margin-left:6px;flex-shrink:0;';
+    applyFavStyle(favBtn, false);
+    favBtn.addEventListener('click', toggleFavorite);
     left.appendChild(sep);
     left.appendChild(el);
+    left.appendChild(favBtn);
   }
   var show = title && title.trim() !== '';
   if (show) {
@@ -68,11 +58,36 @@ function setHeaderChatTitle(title, loading) {
     el.style.display = 'inline';
     var s = document.getElementById('header-title-sep');
     if (s) s.style.display = 'inline';
+    var fb = document.getElementById('header-fav-btn');
+    if (fb && !loading) fb.style.display = 'inline-block';
   } else {
     el.textContent = '';
     el.style.display = 'none';
     var s2 = document.getElementById('header-title-sep');
     if (s2) s2.style.display = 'none';
+    var fb2 = document.getElementById('header-fav-btn');
+    if (fb2) fb2.style.display = 'none';
+  }
+}
+
+function setHeaderFavorite(isFavorite) {
+  var btn = document.getElementById('header-fav-btn');
+  if (!btn) return;
+  applyFavStyle(btn, isFavorite);
+  btn.dataset.fav = isFavorite ? '1' : '0';
+}
+
+async function toggleFavorite() {
+  if (!currentSessionId) return;
+  var btn    = document.getElementById('header-fav-btn');
+  var isFav  = btn && btn.dataset.fav === '1';
+  var newFav = isFav ? 0 : 1;
+  try {
+    await api('PATCH', '/api/sessions/' + currentSessionId, { is_favorite: newFav });
+    setHeaderFavorite(newFav === 1);
+    loadSidebarChatList();
+  } catch(e) {
+    showToast('즐겨찾기 변경 실패', 'error');
   }
 }
 
@@ -110,14 +125,6 @@ function renderAttachChips() {
     });
     container.appendChild(chip);
   });
-}
-
-function getFileIcon(name) {
-  var ext = name.split('.').pop().toLowerCase();
-  if (['png','jpg','jpeg','webp','gif'].includes(ext)) return '🖼';
-  if (ext === 'pdf') return '📄';
-  if (ext === 'docx') return '📝';
-  return '📎';
 }
 
 function clearAttachments() {
@@ -294,6 +301,7 @@ async function loadSession(sessionId) {
     var el = document.getElementById('chat-messages');
     el.innerHTML = '';
     setHeaderChatTitle(data.title && data.title !== '새 대화' ? data.title : '');
+    setHeaderFavorite(data.is_favorite === 1);
     var st = streamStateMap[sessionId];
     if (st && !st.done) {
       if (data.messages) {
@@ -418,7 +426,7 @@ function createThinkingPanel() {
 }
 
 function finalizeThinkingPanel(panel, thinkText) {
-  panel.querySelector('.thinking-label').textContent = '추론 완료 (' + thinkText.length + '자)';
+  panel.querySelector('.thinking-label').textContent = '추론 과정 (' + thinkText.length + '자)';
   panel.querySelector('.thinking-content').innerHTML = '<pre>' + escapeHtml(thinkText) + '</pre>';
   panel.classList.remove('thinking-active');
 }
@@ -530,7 +538,7 @@ function startTitlePolling(sessionId, fallbackText) {
 // ──────────────────────────────────────
 // 메시지 전송
 // ──────────────────────────────────────
-async function sendMessage() {
+async function sendMessage(isRegenerate) {
   var input = document.getElementById('chat-input');
   var text  = input ? input.value.trim() : '';
   if (!text || isStreaming) return;
@@ -538,7 +546,6 @@ async function sendMessage() {
   var isFirst   = (document.querySelectorAll('.message-wrap.user').length === 0);
   input.value = '';
   input.style.height = 'auto';
-  // 사용자 메시지 추가 시 최신 로고 제거
   removeLatestLogo();
   appendMessage('user', text);
   setStreamingMode(true);
@@ -551,7 +558,7 @@ async function sendMessage() {
   try {
     var resp = await fetch('/api/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ session_id: sessionId, message: text }),
+      body: JSON.stringify({ session_id: sessionId, message: text, is_regenerate: !!isRegenerate }),
       signal: abortController.signal,
     });
     var reader = resp.body.getReader();
@@ -598,10 +605,26 @@ async function sendMessage() {
   } catch(e) {
     st.done = true;
     removeLogoIndicator();
+    // 추론 중이던 패널 강제 종료
+    if (thinkPanel) finalizeThinkingPanel(thinkPanel, st.thinking || '(중단됨)');
     if (e.name === 'AbortError') {
-      if (streamBubble) { streamBubble.innerHTML = renderMarkdown(st.response || '_(중단됨)_'); updateLatestLogo(); }
+      if (streamBubble) {
+        streamBubble.innerHTML = renderMarkdown(st.response || '');
+        streamWrap && streamWrap.removeAttribute('id');
+        streamWrap && streamWrap.appendChild(makeActions(st.response, true));
+        updateLatestLogo();
+      } else {
+        appendMessage('assistant', '_(응답이 중단되었습니다)_');
+        updateLatestLogo();
+      }
     } else {
-      if (streamBubble) { streamBubble.innerHTML = '<span style="color:var(--danger)">연결 오류</span>'; updateLatestLogo(); }
+      if (streamBubble) {
+        streamBubble.innerHTML = '<span style="color:var(--danger)">연결 오류가 발생했습니다.</span>';
+        updateLatestLogo();
+      } else {
+        appendMessage('assistant', '연결 오류가 발생했습니다.');
+        updateLatestLogo();
+      }
     }
   } finally { setStreamingMode(false); scrollToBottom(); }
 
@@ -651,6 +674,8 @@ async function sendMessage() {
       var res = appendStreamingBubble();
       streamWrap = res.wrap; streamBubble = res.bubble;
       st._wrap = streamWrap; st._bubble = streamBubble;
+      // 인디케이터 제거 즉시 버블 로고 표시
+      updateLatestLogo();
     }
     streamBubble.innerHTML = renderMarkdown(st.response);
     scrollToBottom();
@@ -673,7 +698,7 @@ async function regenerateLast() {
   uWraps[uWraps.length-1].remove();
   removeLatestLogo();
   document.getElementById('chat-input').value = lastText;
-  await sendMessage();
+  await sendMessage(true); // isRegenerate=true
 }
 
 function setStreamingMode(active) {
@@ -739,6 +764,8 @@ var chatCSS =
 /* 헤더 제목 */
 '#header-title-sep{color:var(--text-muted);margin:0 6px;font-size:var(--font-size-sm);display:none;}' +
 '#header-chat-title{font-size:var(--font-size-sm);color:var(--text-secondary);font-weight:400;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;}' +
+'#header-fav-btn{display:none;align-items:center;justify-content:center;margin-left:6px;padding:2px 4px;background:none;border:none;cursor:pointer;font-size:14px;opacity:0.6;transition:opacity 0.15s;}' +
+'#header-fav-btn:hover{opacity:1;}' +
 '.title-loading{color:var(--text-muted);animation:title-blink 0.9s ease-in-out infinite;letter-spacing:3px;}' +
 '@keyframes title-blink{0%,100%{opacity:1;}50%{opacity:0.2;}}' +
 
@@ -749,7 +776,7 @@ var chatCSS =
 
 /* 로고 슬롯 — 항상 고정 너비, 내용 유무와 무관 */
 '.bubble-logo-slot{flex-shrink:0;width:34px;display:flex;align-items:flex-start;padding-top:6px;justify-content:center;}' +
-'.bubble-logo-img{width:20px;height:20px;object-fit:contain;opacity:0.75;}' +
+'.bubble-logo-img{width:22px;height:22px;object-fit:contain;opacity:0.8;}' +
 '.bubble-logo-emoji{font-size:16px;line-height:1;opacity:0.75;}' +
 
 /* 말풍선 */
@@ -784,7 +811,7 @@ var chatCSS =
 
 /* 그라데이션 마스크 컨테이너 */
 '.logo-gradient-mask{' +
-  'width:34px;height:34px;position:relative;overflow:hidden;' +
+  'width:22px;height:22px;position:relative;overflow:hidden;' +
   '-webkit-mask-size:contain;mask-size:contain;' +
   '-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;' +
   '-webkit-mask-position:center;mask-position:center;' +
@@ -801,25 +828,21 @@ var chatCSS =
   'background:radial-gradient(circle at center,rgba(232,201,122,0.9) 0,rgba(232,201,122,0) 60%) no-repeat;' +
   'animation:orb-vertical 6s ease infinite;' +
 '}' +
-/* orb 2 — strawberry */
 '.logo-orb-2{' +
   'width:140%;height:140%;top:-20%;left:-20%;' +
-  'background:radial-gradient(circle at center,rgba(245,140,170,0.85) 0,rgba(245,140,170,0) 55%) no-repeat;' +
+  'background:radial-gradient(circle at center,rgba(245,140,149,0.85) 0,rgba(245,140,149,0) 55%) no-repeat;' +
   'animation:orb-circle 8s ease infinite;transform-origin:calc(50% - 20px) calc(50%);' +
 '}' +
-/* orb 3 — mint */
 '.logo-orb-3{' +
   'width:130%;height:130%;top:-15%;left:-15%;' +
   'background:radial-gradient(circle at center,rgba(100,220,185,0.8) 0,rgba(100,220,185,0) 50%) no-repeat;' +
   'animation:orb-horizontal 7s ease infinite;' +
 '}' +
-/* orb 4 — blueberry */
 '.logo-orb-4{' +
   'width:150%;height:150%;top:-25%;left:-25%;' +
   'background:radial-gradient(circle at center,rgba(190,120,240,0.75) 0,rgba(190,120,240,0) 50%) no-repeat;' +
   'animation:orb-circle 10s ease infinite reverse;transform-origin:calc(50% + 15px) calc(50% - 10px);' +
 '}' +
-/* orb 5 — mango */
 '.logo-orb-5{' +
   'width:120%;height:120%;top:-10%;left:-10%;' +
   'background:radial-gradient(circle at center,rgba(255,165,100,0.7) 0,rgba(255,165,100,0) 55%) no-repeat;' +
@@ -913,7 +936,7 @@ document.head.appendChild(_chatStyle);
 // ──────────────────────────────────────
 // 이벤트
 // ──────────────────────────────────────
-document.addEventListener('DOMContentLoaded', function() {
+onReady(function() {
   renderChatPage();
   initNewChat();
 });

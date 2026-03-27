@@ -454,9 +454,10 @@ def add_vectors(chunk_ids: list[int], vectors: list[list[float]]) -> None:
 # ──────────────────────────────────────────
 
 def fts_search_chunks(query: str, top_k: int = 20) -> list[dict]:
-    """FTS5 키워드 검색."""
+    """FTS5 키워드 검색 (prefix 지원)."""
     conn = get_connection()
     try:
+        fts_query = query.strip() + '*'
         rows = conn.execute("""
             SELECT c.id, c.file_id, c.content,
                    rank AS fts_score
@@ -465,7 +466,7 @@ def fts_search_chunks(query: str, top_k: int = 20) -> list[dict]:
             WHERE fts_chunks MATCH ?
             ORDER BY rank
             LIMIT ?
-        """, (query, top_k)).fetchall()
+        """, (fts_query, top_k)).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
         logger.warning("FTS5 검색 오류: %s", e)
@@ -555,19 +556,41 @@ def hybrid_search(
 # ──────────────────────────────────────────
 
 def search_sessions(query: str, top_k: int = 20) -> list[dict]:
-    """FTS5로 채팅 메시지 검색."""
+    """채팅 제목 + 메시지 내용 LIKE 검색."""
     conn = get_connection()
     try:
-        rows = conn.execute("""
-            SELECT s.id as session_id, s.title, s.updated_at,
-                   f.content as snippet
-            FROM fts_messages f
-            JOIN sessions s ON s.id = f.session_id
-            WHERE fts_messages MATCH ?
-            ORDER BY rank
+        like = f"%{query}%"
+        # 제목 검색
+        title_rows = conn.execute("""
+            SELECT id as session_id, title, updated_at, NULL as snippet
+            FROM sessions
+            WHERE title LIKE ?
+            ORDER BY updated_at DESC
             LIMIT ?
-        """, (query, top_k)).fetchall()
-        return [dict(r) for r in rows]
+        """, (like, top_k)).fetchall()
+
+        # 메시지 내용 검색 (중복 세션 제외)
+        title_ids = {r["session_id"] for r in title_rows}
+        content_rows = conn.execute("""
+            SELECT DISTINCT s.id as session_id, s.title, s.updated_at,
+                   m.content as snippet
+            FROM messages m
+            JOIN sessions s ON s.id = m.session_id
+            WHERE m.content LIKE ?
+              AND m.role IN ('user','assistant')
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+        """, (like, top_k)).fetchall()
+
+        # 중복 제거 후 병합
+        seen = set(title_ids)
+        results = list(title_rows)
+        for r in content_rows:
+            d = dict(r)
+            if d["session_id"] not in seen:
+                seen.add(d["session_id"])
+                results.append(d)
+        return [dict(r) for r in results[:top_k]]
     except Exception as e:
         logger.warning("메시지 검색 오류: %s", e)
         return []
@@ -679,5 +702,27 @@ def delete_external_api(api_id: int) -> None:
     try:
         conn.execute("DELETE FROM external_apis WHERE id=?", (api_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────
+# 재생성용 — 마지막 assistant 메시지 삭제
+# ──────────────────────────────────────────
+
+def delete_last_assistant_message(session_id: int) -> None:
+    """재생성 시 마지막 assistant 메시지를 DB에서 삭제."""
+    conn = get_connection()
+    try:
+        row = conn.execute("""
+            SELECT id FROM messages
+            WHERE session_id=? AND role='assistant'
+            ORDER BY id DESC LIMIT 1
+        """, (session_id,)).fetchone()
+        if row:
+            msg_id = row["id"]
+            conn.execute("DELETE FROM messages WHERE id=?", (msg_id,))
+            conn.execute("DELETE FROM fts_messages WHERE message_id=?", (msg_id,))
+            conn.commit()
     finally:
         conn.close()
