@@ -727,7 +727,7 @@ async def _generate_title(session_id: int, user_msg: str, assistant_msg: str, co
             title = title.split('</think>')[-1].strip()
         # 혹시 남은 <think> 태그 제거
         import re
-        title = re.sub(r'<think>.*?</think>', '', title, flags=re.DOTALL).strip()[:20]
+        title = re.sub(r'<think>.*?</think>', '', title, flags=re.DOTALL).strip()
 
         final_title = title if title else fallback_title
         update_session(session_id, title=final_title)
