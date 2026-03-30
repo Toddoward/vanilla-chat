@@ -132,6 +132,12 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite DESC, updated_at DESC)")
 
+    # 마이그레이션: thinking 컬럼이 없으면 추가
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "thinking" not in existing:
+        conn.execute("ALTER TABLE messages ADD COLUMN thinking TEXT DEFAULT NULL")
+        logger.info("messages 테이블에 thinking 컬럼 추가 완료")
+
 
 def _create_fts_tables(conn: sqlite3.Connection) -> None:
     """FTS5 전문 검색 가상 테이블 생성."""
@@ -264,13 +270,17 @@ def delete_sessions(session_ids: list[int]) -> int:
 # 메시지 CRUD
 # ──────────────────────────────────────────
 
-def add_message(session_id: int, role: str, content: str) -> dict:
+THINKING_MAX_CHARS = 10_000  # thinking 저장 상한 (초과 시 앞부분만 저장)
+
+def add_message(session_id: int, role: str, content: str, thinking: str | None = None) -> dict:
     conn = get_connection()
     try:
-        # FTS5 동기화
+        # thinking 상한 처리
+        thinking_store = thinking[:THINKING_MAX_CHARS] if thinking else None
+
         cur = conn.execute(
-            "INSERT INTO messages(session_id, role, content) VALUES(?,?,?) RETURNING *",
-            (session_id, role, content)
+            "INSERT INTO messages(session_id, role, content, thinking) VALUES(?,?,?,?) RETURNING *",
+            (session_id, role, content, thinking_store)
         )
         row = cur.fetchone()
         msg_id = row["id"]

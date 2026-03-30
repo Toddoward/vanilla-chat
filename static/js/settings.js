@@ -11,7 +11,8 @@ import { icon } from './icons.js';
 // ──────────────────────────────────────
 let _config = {};
 let _models  = [];
-let _saveTimers = {};  // path별 독립 타이머
+let _allCaps = {};   // { modelName: { completion, vision, thinking, tools, embedding } }
+let _saveTimers = {};
 let _promptTimer = null;
 
 // ──────────────────────────────────────
@@ -111,10 +112,14 @@ function renderSettingsPage() {
 // ──────────────────────────────────────
 async function loadSettings() {
   try {
-    [_config, { models: _models }] = await Promise.all([
+    const [cfg, { models: rawModels }, allCaps] = await Promise.all([
       api('GET', '/api/config'),
       api('GET', '/api/models'),
+      api('GET', '/api/models/all-capabilities'),
     ]);
+    _config = cfg;
+    _models = rawModels;
+    _allCaps = allCaps;  // { modelName: { completion, vision, thinking, tools, embedding } }
     renderModelsSection();
     renderInferenceSection();
     renderContextSection();
@@ -245,35 +250,64 @@ async function renderModelsSection() {
   if (!el) return;
   el.innerHTML = '';
 
-  const modelNames = _models.map(m => m.name || m);
   const modCfg = _config.models || {};
 
+  // capabilities 기반 슬롯별 필터링
+  const allModelNames = _models.map(m => m.name || m);
+
+  function filtered(pred) {
+    const names = allModelNames.filter(name => {
+      const caps = _allCaps[name];
+      return caps ? pred(caps) : true;
+    });
+    return names.length ? names : allModelNames;
+  }
+
+  const responseModels  = filtered(c => c.completion && !c.embedding);
+  const visionModels    = filtered(c => c.completion && c.vision && !c.embedding);
+  // 방법 B: embedding capability 있으면서 이름에 reranker가 없는 모델만
+  const embeddingModels = filtered(c => c.embedding)
+    .filter(name => !name.toLowerCase().includes('reranker'));
+
+  // 리랭커: Ollama에서 reranker 이름 포함 모델 + FlagEmbedding 고정 항목
+  const ollamaRerankers = allModelNames.filter(name =>
+    name.toLowerCase().includes('reranker')
+  );
+  const rerankerModels = [
+    'bge-reranker-v2-m3 (FlagEmbedding)',  // FlagEmbedding 라이브러리 고정 항목
+    ...ollamaRerankers,
+  ];
+
   const slots = [
-    { key: 'response',  label: '응답 모델',   desc: '텍스트 생성에 사용' },
-    { key: 'vision',    label: '시각 모델',   desc: 'response와 동일하면 인스턴스 공유' },
-    { key: 'embedding', label: '임베딩 모델', desc: 'BGE-M3 권장' },
-    { key: 'reranker',  label: '리랭커 모델', desc: 'BGE-Reranker-v2-M3 권장 (FlagEmbedding)' },
+    { key: 'response',  label: '응답 모델',   desc: '텍스트 생성 모델',                       list: responseModels },
+    { key: 'vision',    label: '시각 모델',   desc: 'response와 동일하면 인스턴스 공유',           list: visionModels },
+    { key: 'embedding', label: '임베딩 모델', desc: 'BGE-M3 권장',                           list: embeddingModels },
+    { key: 'reranker',  label: '리랭커 모델', desc: 'FlagEmbedding 또는 Ollama reranker 모델', list: rerankerModels },
   ];
 
   for (const slot of slots) {
     const current = modCfg[slot.key] || '';
+    // 리랭커 슬롯: 고정 항목의 표시값과 실제 저장값을 매핑
+    const displayCurrent = (slot.key === 'reranker' && current === 'bge-reranker-v2-m3')
+      ? 'bge-reranker-v2-m3 (FlagEmbedding)'
+      : current;
     const sel = makeSelect(
       `st-model-${slot.key}`,
-      modelNames,
-      current,
+      slot.list,
+      displayCurrent,
       async (val) => {
-        scheduleSave(`models.${slot.key}`, val, () => {
-          showModelChangeNotice();
-        });
-        if (slot.key === 'response') {
-          await updateVisionHint(val);
-        }
+        // 리랭커 고정 항목 선택 시 실제 저장값으로 변환
+        const saveVal = (slot.key === 'reranker' && val === 'bge-reranker-v2-m3 (FlagEmbedding)')
+          ? 'bge-reranker-v2-m3'
+          : val;
+        scheduleSave(`models.${slot.key}`, saveVal, () => showModelChangeNotice());
+        if (slot.key === 'response') await updateVisionHint(val);
       }
     );
     el.appendChild(makeRow(slot.label, slot.desc, sel));
   }
 
-  // 현재 response 모델 capabilities 표시
+  // 응답 모델 capabilities 뱃지
   const capBadge = document.createElement('div');
   capBadge.id = 'st-cap-badge';
   capBadge.className = 'st-cap-badge';
@@ -284,35 +318,47 @@ async function renderModelsSection() {
 async function updateVisionHint(modelName) {
   const badge = document.getElementById('st-cap-badge');
   if (!badge || !modelName) return;
-  badge.innerHTML = '<i class="bi bi-clock"></i> capabilities 확인 중...';
-  try {
-    const caps = await api('GET', `/api/models/capabilities?model=${encodeURIComponent(modelName)}`);
-    const tags = [];
-    if (caps.thinking) tags.push('<i class="bi bi-brain"></i> thinking');
-    if (caps.vision)   tags.push('<i class="bi bi-eye"></i> vision');
-    if (caps.tools)    tags.push('<i class="bi bi-tools"></i> tools');
-    badge.innerHTML = tags.length
-      ? `${modelName}: ${tags.join(' · ')}`
-      : `${modelName}: completion only`;
 
-    // thinking 지원 여부에 따라 추론 섹션 think 토글 상태 업데이트
-    updateThinkToggleState(caps.thinking);
-
-    // vision 지원 시 vision 슬롯에 동일 모델 자동 제안
-    if (caps.vision) {
-      const visSel = document.getElementById('st-model-vision');
-      if (visSel && visSel.value !== modelName) {
-        const hint = document.createElement('p');
-        hint.className = 'st-hint';
-        hint.innerHTML = `<i class="bi bi-lightbulb"></i> ${modelName}이 vision을 지원합니다. 시각 모델을 동일하게 설정하면 인스턴스를 공유합니다.`;
-        hint.id = 'st-vision-hint';
-        const old = document.getElementById('st-vision-hint');
-        if (old) old.remove();
-        document.getElementById('sec-models-content')?.appendChild(hint);
-      }
+  // 캐시 우선 사용, 없으면 API 조회
+  let caps = _allCaps[modelName];
+  if (!caps) {
+    badge.innerHTML = '<i class="bi bi-clock"></i> capabilities 확인 중...';
+    try {
+      caps = await api('GET', `/api/models/capabilities?model=${encodeURIComponent(modelName)}`);
+      _allCaps[modelName] = caps;
+    } catch {
+      badge.textContent = 'capabilities 조회 실패';
+      return;
     }
-  } catch {
-    badge.textContent = 'capabilities 조회 실패';
+  }
+
+  const tags = [];
+  if (caps.thinking) tags.push('<i class="bi bi-brain"></i> thinking');
+  if (caps.vision)   tags.push('<i class="bi bi-eye"></i> vision');
+  if (caps.tools)    tags.push('<i class="bi bi-tools"></i> tools');
+  badge.innerHTML = tags.length
+    ? `${modelName}: ${tags.join(' · ')}`
+    : `${modelName}: completion only`;
+
+  updateThinkToggleState(caps.thinking);
+
+  // vision 지원 시 vision 슬롯 동일 모델 자동 제안
+  if (caps.vision) {
+    const visSel = document.getElementById('st-model-vision');
+    if (visSel && visSel.value !== modelName) {
+      const old = document.getElementById('st-vision-hint');
+      if (old) old.remove();
+      const hint = document.createElement('p');
+      hint.className = 'st-hint';
+      hint.id = 'st-vision-hint';
+      hint.innerHTML = `<i class="bi bi-lightbulb"></i> ${modelName}이 vision을 지원합니다. 시각 모델을 동일하게 설정하면 인스턴스를 공유합니다.`;
+      document.getElementById('sec-models-content')?.appendChild(hint);
+    } else {
+      // 이미 동일 모델이면 힌트 제거
+      document.getElementById('st-vision-hint')?.remove();
+    }
+  } else {
+    document.getElementById('st-vision-hint')?.remove();
   }
 }
 

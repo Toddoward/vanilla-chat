@@ -300,6 +300,49 @@ async def list_ollama_models() -> list[str]:
         return []
 
 
+async def fetch_all_capabilities() -> dict[str, dict]:
+    """
+    설치된 모든 모델의 capabilities를 병렬 조회하여 반환.
+    반환: { "model_name": { "thinking": bool, "vision": bool, "tools": bool, "completion": bool, "embedding": bool } }
+    """
+    import asyncio
+
+    model_names = await list_ollama_models()
+
+    async def _fetch_one(name: str) -> tuple[str, dict]:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{OLLAMA_BASE_URL}/api/show",
+                    json={"name": name}
+                )
+                resp.raise_for_status()
+                raw_caps = {c.lower() for c in resp.json().get("capabilities", [])}
+            caps = {
+                "thinking":  "thinking"  in raw_caps,
+                "vision":    "vision"    in raw_caps,
+                "tools":     "tools"     in raw_caps,
+                "completion":"completion" in raw_caps,
+                "embedding": "embedding" in raw_caps,
+            }
+        except Exception as e:
+            logger.warning("capabilities 조회 실패 [%s]: %s", name, e)
+            caps = {"thinking": False, "vision": False, "tools": False,
+                    "completion": True, "embedding": False}
+        return name, caps
+
+    results = await asyncio.gather(*[_fetch_one(n) for n in model_names], return_exceptions=True)
+
+    output = {}
+    for item in results:
+        if isinstance(item, Exception):
+            logger.warning("capabilities 병렬 조회 예외: %s", item)
+            continue
+        name, caps = item
+        output[name] = caps
+    return output
+
+
 # ──────────────────────────────────────────
 # 전역 싱글톤
 # ──────────────────────────────────────────

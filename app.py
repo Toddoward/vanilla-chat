@@ -32,6 +32,7 @@ from core.providers import (
     check_ollama_connection,
     get_model_context_length,
     list_ollama_models,
+    fetch_all_capabilities,
 )
 from core.context_manager import get_context_manager, clear_context_manager
 from core.file_engine import (
@@ -70,6 +71,19 @@ def save_config(config: dict) -> None:
 
 
 # ──────────────────────────────────────────
+# 백그라운드 capabilities 캐시 로더
+# ──────────────────────────────────────────
+async def _load_capabilities_bg(app: FastAPI) -> None:
+    """앱 시작 후 백그라운드에서 모든 모델 capabilities를 병렬 조회하여 캐싱."""
+    try:
+        caps = await fetch_all_capabilities()
+        app.state.all_capabilities = caps
+        logger.info("모델 capabilities 캐시 완료 (백그라운드): %d개", len(caps))
+    except Exception as e:
+        logger.warning("capabilities 백그라운드 캐시 실패: %s", e)
+
+
+# ──────────────────────────────────────────
 # Lifespan (시작/종료 훅)
 # ──────────────────────────────────────────
 @asynccontextmanager
@@ -95,8 +109,13 @@ async def lifespan(app: FastAPI):
         model_manager.context_length = ctx_len
         logger.info("Ollama 연결 OK | 모델: %s | 컨텍스트: %d",
                     model_manager.response_model_name, ctx_len)
+        # 5. capabilities 캐시 — 백그라운드에서 병렬 조회 (시작 지연 없음)
+        app.state.all_capabilities = {}  # 빈 캐시로 즉시 시작
+        import asyncio
+        asyncio.create_task(_load_capabilities_bg(app))
     else:
         logger.warning("Ollama 연결 실패 — 서버 실행 후 재시도 필요")
+        app.state.all_capabilities = {}
 
     logger.info("🍨 Vanilla Chat 준비 완료")
 
@@ -196,6 +215,17 @@ async def get_models():
     """Ollama에서 사용 가능한 모델 목록."""
     models = await list_ollama_models()
     return {"models": models}
+
+
+@app.get("/api/models/all-capabilities")
+async def get_all_capabilities():
+    """설치된 모든 모델의 capabilities 반환 (캐시 사용)."""
+    cached = getattr(app.state, "all_capabilities", None)
+    if cached is None:
+        # 캐시 없으면 실시간 조회
+        cached = await fetch_all_capabilities()
+        app.state.all_capabilities = cached
+    return cached
 
 
 @app.get("/api/models/capabilities")
@@ -590,12 +620,14 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
             response_text = "".join(full_response)
 
-            # <think> 태그 제거 후 DB 저장 (assistant만)
+            # thinking 추출 + <think> 태그 제거 후 DB 저장
             import re as _re
+            thinking_match = _re.search(r'<think>(.*?)</think>', response_text, flags=_re.DOTALL)
+            thinking_text  = thinking_match.group(1).strip() if thinking_match else None
             clean_response = _re.sub(
                 r'<think>.*?</think>', '', response_text, flags=_re.DOTALL
             ).strip()
-            add_message(body.session_id, "assistant", clean_response)
+            add_message(body.session_id, "assistant", clean_response, thinking=thinking_text)
 
             # 컨텍스트 히스토리 갱신 (think 제거본으로)
             ctx.add_exchange(body.message, clean_response)

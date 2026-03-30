@@ -232,10 +232,9 @@ function showGreeting() {
   var greeting  = pickGreeting(App.appState, App.themeConfig);
   var suggested = (App.themeConfig && App.themeConfig.suggested_questions) ||
     ['저장된 파일 검색해줘', '이 문서 요약해줘', '간단하게 소개해줘'];
-  var emoji = (App.appInfo && App.appInfo.logo_emoji_fallback) || '🍨';
   el.innerHTML =
     '<div id="greeting-screen">' +
-      '<div id="greeting-logo"><span style="font-size:48px;">' + emoji + '</span></div>' +
+      '<div id="greeting-logo"></div>' +
       '<p id="greeting-text">' + escapeHtml(greeting) + '</p>' +
       '<div id="suggested-cards">' +
         suggested.map(function(q) {
@@ -243,6 +242,9 @@ function showGreeting() {
         }).join('') +
       '</div>' +
     '</div>';
+  // 로고 이미지 삽입 (makeLogoImg 재사용)
+  var logoEl = document.getElementById('greeting-logo');
+  if (logoEl) logoEl.appendChild(makeLogoImg());
   el.querySelectorAll('.suggest-card').forEach(function(card) {
     card.addEventListener('click', function() {
       document.getElementById('chat-input').value = card.dataset.q;
@@ -333,6 +335,13 @@ async function loadSession(sessionId) {
     if (!data.messages || !data.messages.length) { showGreeting(); return; }
     data.messages.forEach(function(msg) {
       if (msg.role === 'system') return;
+      // thinking이 저장된 assistant 메시지는 패널 먼저 렌더링
+      if (msg.role === 'assistant' && msg.thinking) {
+        var tp = createThinkingPanel();
+        finalizeThinkingPanel(tp, msg.thinking);
+        var chatEl = document.getElementById('chat-messages');
+        if (chatEl) chatEl.appendChild(tp);
+      }
       appendMessage(msg.role, msg.content, false);
     });
     updateLatestLogo();
@@ -588,11 +597,24 @@ async function sendMessage(isRegenerate) {
           }
           st.done = true;
           removeLogoIndicator();
-          if (streamBubble) streamBubble.innerHTML = renderMarkdown(st.response);
-          if (streamWrap) {
-            streamWrap.removeAttribute('id');
-            streamWrap.appendChild(makeActions(st.response, true));
-            updateLatestLogo();
+          // 추론만 하고 실제 응답이 없는 경우 → 실패 처리
+          if (!st.response || !st.response.trim()) {
+            var failMsg = '_(추론 중 응답 생성에 실패했습니다. 재생성을 시도해 주세요)_';
+            if (streamBubble) {
+              streamBubble.innerHTML = '<span style="color:var(--text-muted)">' + renderMarkdown(failMsg) + '</span>';
+            }
+            if (streamWrap) {
+              streamWrap.removeAttribute('id');
+              streamWrap.appendChild(makeActions('', true));
+              updateLatestLogo();
+            }
+          } else {
+            if (streamBubble) streamBubble.innerHTML = renderMarkdown(st.response);
+            if (streamWrap) {
+              streamWrap.removeAttribute('id');
+              streamWrap.appendChild(makeActions(st.response, true));
+              updateLatestLogo();
+            }
           }
           if (isFirst) startTitlePolling(sessionId, text);
         } else if (data.type === 'error') {
@@ -725,6 +747,14 @@ function setStreamingMode(active) {
     attachBtn.style.cursor        = active ? 'not-allowed' : 'pointer';
   }
   if (fileInput) fileInput.disabled = active;
+
+  // 모든 재생성 버튼 비활성화/활성화
+  document.querySelectorAll('.regen-btn').forEach(function(btn) {
+    btn.disabled = active;
+    btn.style.opacity       = active ? '0.35' : '1';
+    btn.style.pointerEvents = active ? 'none'  : 'auto';
+    btn.style.cursor        = active ? 'not-allowed' : 'pointer';
+  });
 }
 
 function setupInputEvents() {
@@ -758,6 +788,7 @@ var chatCSS =
 
 /* Greeting */
 '#greeting-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px;padding:40px 16px;}' +
+'#greeting-logo img{width:64px;height:64px;object-fit:contain;}' +
 '#greeting-text{font-size:18px;font-weight:500;color:var(--text-primary);text-align:center;}' +
 '#suggested-cards{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px;}' +
 '.suggest-card{padding:8px 16px;border:1px solid var(--border);border-radius:var(--radius-full);background:var(--bg-tertiary);color:var(--text-secondary);font-size:var(--font-size-sm);cursor:pointer;transition:all 0.15s;}' +
