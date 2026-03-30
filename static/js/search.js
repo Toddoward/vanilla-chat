@@ -1,5 +1,6 @@
 import { App, navigateTo, api } from './app.js';
 import { escapeHtml, getFileIcon, showToast, onReady } from './utils.js';
+import { icon } from './icons.js';
 
 
 
@@ -36,9 +37,9 @@ function renderSearchPage() {
   page.innerHTML =
     '<div id="sr-header">' +
       '<div id="sr-input-wrap">' +
-        '<span id="sr-icon">🔍</span>' +
+        '<span id="sr-icon"><i class="bi bi-search"></i></span>' +
         '<input id="sr-input" type="text" placeholder="채팅, 파일 내용 검색..."/>' +
-        '<button id="sr-clear" style="display:none;">✕</button>' +
+        '<button id="sr-clear" style="display:none;"><i class="bi bi-x-lg"></i></button>' +
       '</div>' +
     '</div>' +
     '<div id="sr-body">' +
@@ -46,7 +47,7 @@ function renderSearchPage() {
       '<div id="sr-section-files"></div>' +
     '</div>';
 
-  var input   = document.getElementById('sr-input');
+  var input    = document.getElementById('sr-input');
   var clearBtn = document.getElementById('sr-clear');
 
   input.addEventListener('input', function() {
@@ -86,17 +87,18 @@ function renderSessions(sessions, q) {
   if (!el) return;
   if (!sessions.length) {
     el.innerHTML = q
-      ? '<div class="sr-section-label">💬 채팅</div><div class="sr-empty">결과 없음</div>'
+      ? '<div class="sr-section-label"><i class="bi bi-chat-square-dots"></i> 채팅</div><div class="sr-empty">결과 없음</div>'
       : '';
     return;
   }
-  var html = '<div class="sr-section-label">💬 채팅 <span class="sr-count">' + sessions.length + '</span></div>';
+  var html = '<div class="sr-section-label"><i class="bi bi-chat-square-dots"></i> 채팅 <span class="sr-count">' + sessions.length + '</span></div>';
   sessions.forEach(function(s) {
+    var sid = s.session_id || s.id;
     var title   = highlight(s.title || '새 대화', q);
     var snippet = s.snippet ? highlight(s.snippet.slice(0, 100), q) : '';
     html +=
-      '<div class="sr-item" data-session-id="' + s.session_id + '" data-type="session">' +
-        '<div class="sr-item-icon">💬</div>' +
+      '<div class="sr-item" data-session-id="' + sid + '" data-type="session">' +
+        '<div class="sr-item-icon"><i class="bi bi-chat-square-dots"></i></div>' +
         '<div class="sr-item-info">' +
           '<span class="sr-item-title">' + title + '</span>' +
           (snippet ? '<span class="sr-item-snippet">' + snippet + '</span>' : '') +
@@ -130,30 +132,31 @@ function renderFiles(files, q) {
   if (!el) return;
   if (!files.length) {
     el.innerHTML = q
-      ? '<div class="sr-section-label">📁 파일</div><div class="sr-empty">결과 없음</div>'
+      ? '<div class="sr-section-label"><i class="bi bi-folder2"></i> 파일</div><div class="sr-empty">결과 없음</div>'
       : '';
     return;
   }
-  var html = '<div class="sr-section-label">📁 파일 <span class="sr-count">' + files.length + '</span></div>';
+  var html = '<div class="sr-section-label"><i class="bi bi-folder2"></i> 파일 <span class="sr-count">' + files.length + '</span></div>';
   files.forEach(function(f) {
     var name    = highlight(f.display_name || f.original_path || '', q);
     var snippet = f.snippet ? highlight(f.snippet.slice(0, 100), q) : '';
-    var icon    = getFileIcon(f.display_name || '');
+    var fileIcon = getFileIcon(f.display_name || '');
     html +=
       '<div class="sr-item" data-path="' + escapeHtml(f.original_path || '') + '" data-type="file">' +
-        '<div class="sr-item-icon">' + icon + '</div>' +
+        '<div class="sr-item-icon">' + fileIcon + '</div>' +
         '<div class="sr-item-info">' +
           '<span class="sr-item-title">' + name + '</span>' +
           (snippet ? '<span class="sr-item-snippet">' + snippet + '</span>' : '') +
           '<span class="sr-item-path">' + escapeHtml(f.original_path || '') + '</span>' +
         '</div>' +
         '<span class="sr-badge ' + (f.embedding_status === 'done' ? 'done' : 'pending') + '">' +
-          (f.embedding_status === 'done' ? '✅' : '⏳') +
+          (f.embedding_status === 'done'
+            ? '<i class="bi bi-check-circle-fill"></i>'
+            : '<i class="bi bi-clock"></i>') +
         '</span>' +
       '</div>';
   });
   el.innerHTML = html;
-  // 파일 항목 클릭 → 경로 클립보드 복사
   el.querySelectorAll('.sr-item[data-type="file"]').forEach(function(item) {
     item.addEventListener('click', function() {
       var path = item.dataset.path;

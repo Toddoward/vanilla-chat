@@ -42,11 +42,11 @@ export function renderMarkdown(text) {
 // ──────────────────────────────────────
 export function getFileIcon(name) {
   var ext = (name || '').split('.').pop().toLowerCase();
-  if (['png','jpg','jpeg','webp','gif'].includes(ext)) return '🖼';
-  if (ext === 'pdf')  return '📄';
-  if (ext === 'docx') return '📝';
-  if (ext === 'txt' || ext === 'md') return '📃';
-  return '📎';
+  if (['png','jpg','jpeg','webp','gif'].includes(ext)) return '<i class="bi bi-file-earmark-image"></i>';
+  if (ext === 'pdf')  return '<i class="bi bi-file-earmark-pdf"></i>';
+  if (ext === 'docx') return '<i class="bi bi-file-earmark-word"></i>';
+  if (ext === 'txt' || ext === 'md') return '<i class="bi bi-file-earmark-text"></i>';
+  return '<i class="bi bi-paperclip"></i>';
 }
 
 // ──────────────────────────────────────
@@ -102,43 +102,6 @@ export function updateBulkActions(barId, countId, selectedSet) {
     if (count) count.textContent = selectedSet.size + '개 선택됨';
   } else {
     bar.style.display = 'none';
-  }
-}
-
-// ──────────────────────────────────────
-// 즐겨찾기 아이콘 마스킹 (icon_favorite.png or ★ 폴백)
-// ──────────────────────────────────────
-var _favIconOk = null;
-
-export function applyFavStyle(el, active) {
-  el.dataset.active = active ? '1' : '0';
-  if (_favIconOk === false) {
-    el.textContent = '★';
-    el.style.color = active ? 'var(--accent)' : 'var(--text-muted)';
-    el.style.backgroundColor = '';
-  } else {
-    el.textContent = '';
-    el.style.webkitMaskImage    = 'url(/static/images/icon_favorite.png)';
-    el.style.maskImage          = 'url(/static/images/icon_favorite.png)';
-    el.style.webkitMaskSize     = 'contain';
-    el.style.maskSize           = 'contain';
-    el.style.webkitMaskRepeat   = 'no-repeat';
-    el.style.maskRepeat         = 'no-repeat';
-    el.style.webkitMaskPosition = 'center';
-    el.style.maskPosition       = 'center';
-    el.style.backgroundColor    = active ? 'var(--accent)' : 'var(--text-muted)';
-    el.style.color = '';
-    if (_favIconOk === null) {
-      var testImg = new Image();
-      testImg.onload  = function() { _favIconOk = true; };
-      testImg.onerror = function() {
-        _favIconOk = false;
-        document.querySelectorAll('.fav-icon-el').forEach(function(e) {
-          applyFavStyle(e, e.dataset.active === '1');
-        });
-      };
-      testImg.src = '/static/images/icon_favorite.png';
-    }
   }
 }
 

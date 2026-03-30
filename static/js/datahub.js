@@ -1,6 +1,7 @@
 import { App, api } from './app.js';
 import { setDatahubBadge } from './sidebar.js';
 import { onReady, showToast, getFileIcon, escapeHtml, updateBulkActions } from './utils.js';
+import { icon } from './icons.js';
 
 
 
@@ -39,10 +40,10 @@ function renderDataHub() {
   var page = document.getElementById('page-datahub');
   page.innerHTML =
     '<div id="dh-header">' +
-      '<h2 class="dh-title">🗄️ Data Hub</h2>' +
+      '<h2 class="dh-title"><i class="bi bi-database"></i> Data Hub</h2>' +
       '<div id="dh-tabs">' +
-        '<button class="dh-tab active" data-tab="files">📄 파일 관리</button>' +
-        '<button class="dh-tab" data-tab="apis">🌐 API 관리</button>' +
+        '<button class="dh-tab active" data-tab="files"><i class="bi bi-file-earmark-text"></i> 파일 관리</button>' +
+        '<button class="dh-tab" data-tab="apis"><i class="bi bi-globe"></i> API 관리</button>' +
       '</div>' +
     '</div>' +
     '<div id="dh-body">' +
@@ -73,22 +74,17 @@ function renderFilesPanel() {
   var panel = document.getElementById('dh-panel-files');
   if (!panel) return;
   panel.innerHTML =
-    // 드롭존
     '<div id="dh-dropzone">' +
-      '<div class="dz-icon">📂</div>' +
+      '<div class="dz-icon"><i class="bi bi-folder2-open"></i></div>' +
       '<p class="dz-text">파일을 여기에 드래그하거나</p>' +
       '<div class="dz-btns">' +
-        '<label class="dz-btn"><input type="file" id="dh-file-input" multiple style="display:none;"/>📄 파일 선택</label>' +
+        '<label class="dz-btn"><input type="file" id="dh-file-input" multiple style="display:none;"><i class="bi bi-file-earmark-text"></i> 파일 선택</label>' +
       '</div>' +
     '</div>' +
-
-    // 일괄 삭제 (선택 시 동적 등장)
     '<div id="dh-bulk-actions" style="display:none;">' +
       '<span id="dh-selected-count">0개 선택됨</span>' +
-      '<button id="dh-delete-selected" class="dh-danger-btn">🗑 선택 삭제</button>' +
+      '<button id="dh-delete-selected" class="dh-danger-btn"><i class="bi bi-trash"></i> 선택 삭제</button>' +
     '</div>' +
-
-    // 파일 목록
     '<div id="dh-file-list"></div>';
 
   // 드롭존 이벤트
@@ -178,7 +174,7 @@ function renderFileList(files) {
       (f.status === 'BROKEN'
         ? '<button class="dh-reregister-btn" data-id="' + f.id + '">재등록</button>'
         : '') +
-      '<button class="dh-delete-btn" data-id="' + f.id + '">🗑</button>';
+      '<button class="dh-delete-btn" data-id="' + f.id + '"><i class="bi bi-trash"></i></button>';
 
     // 체크박스
     row.querySelector('.dh-check').addEventListener('change', function(e) {
@@ -204,14 +200,14 @@ function renderFileList(files) {
 }
 
 function getStatusBadge(f, pct) {
-  if (f.status === 'BROKEN') return '<span class="dh-badge broken">⚠️ 경로 끊김</span>';
+  if (f.status === 'BROKEN') return '<span class="dh-badge broken"><i class="bi bi-exclamation-triangle"></i> 경로 끊김</span>';
   if (f.embedding_status === 'running') {
     var p = pct !== undefined ? pct + '%' : '';
-    return '<span class="dh-badge running">🟡 임베딩 중... ' + p + '</span>';
+    return '<span class="dh-badge running"><i class="bi bi-arrow-repeat"></i> 임베딩 중... ' + p + '</span>';
   }
-  if (f.embedding_status === 'done')    return '<span class="dh-badge done">✅ 완료</span>';
-  if (f.embedding_status === 'error')   return '<span class="dh-badge error">❌ 오류</span>';
-  return '<span class="dh-badge pending">⏳ 대기</span>';
+  if (f.embedding_status === 'done')  return '<span class="dh-badge done"><i class="bi bi-check-circle-fill"></i> 완료</span>';
+  if (f.embedding_status === 'error') return '<span class="dh-badge error"><i class="bi bi-x-circle-fill"></i> 오류</span>';
+  return '<span class="dh-badge pending"><i class="bi bi-clock"></i> 대기</span>';
 }
 
 async function deleteSelectedFiles() {
@@ -285,13 +281,12 @@ function refreshFileProgress() {
     var badge = row.querySelector('.dh-badge');
     if (!badge) return;
     if (pct < 100) {
-      badge.className   = 'dh-badge running';
-      badge.textContent = '🟡 임베딩 중... ' + pct + '%';
+      badge.className = 'dh-badge running';
+      badge.innerHTML = '<i class="bi bi-arrow-repeat"></i> 임베딩 중... ' + pct + '%';
     } else {
-      // pct === 100: 클래스 무관하게 완료로 갱신
       if (!badge.classList.contains('done')) {
-        badge.className   = 'dh-badge done';
-        badge.textContent = '✅ 완료';
+        badge.className = 'dh-badge done';
+        badge.innerHTML = '<i class="bi bi-check-circle-fill"></i> 완료';
         completedAny = true;
       }
     }
@@ -369,7 +364,7 @@ function renderApiList(apis) {
         '<span class="dh-api-url">' + escapeHtml(a.endpoint) + '</span>' +
       '</div>' +
       '<span class="dh-api-ttl">TTL: ' + ttlLabel + '</span>' +
-      '<span class="dh-badge done">✅ 정상</span>' +
+      '<span class="dh-badge done"><i class="bi bi-check-circle-fill"></i> 정상</span>' +
       '<div class="dh-api-menu">' +
         '<button class="dh-menu-btn" data-id="' + a.id + '">···</button>' +
         '<div class="dh-dropdown" style="display:none;">' +

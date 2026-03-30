@@ -3,7 +3,8 @@
  * 사이드바 — 채팅 목록, 즐겨찾기, 뱃지, 토글
  */
 import { App, navigateTo, api } from './app.js';
-import { getDateGroupLabel, applyFavStyle, onReady } from './utils.js';
+import { getDateGroupLabel, onReady } from './utils.js';
+import { favIcon } from './icons.js';
 
 
 
@@ -119,8 +120,8 @@ function createChatItem(session) {
     const fav = document.createElement('span');
     fav.className = 'sidebar-fav-icon';
     fav.title = '즐겨찾기';
-    fav.style.cssText = 'display:inline-block;width:12px;height:12px;flex-shrink:0;margin-left:4px;vertical-align:middle;';
-    applyFavStyle(fav, true);
+    fav.style.cssText = 'display:inline-flex;align-items:center;flex-shrink:0;margin-left:4px;vertical-align:middle;color:var(--accent);font-size:11px;';
+    fav.innerHTML = favIcon(true);
     el.appendChild(fav);
   }
 

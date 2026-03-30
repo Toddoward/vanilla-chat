@@ -1,6 +1,7 @@
 import { App, navigateTo, api } from './app.js';
 import { loadSidebarChatList } from './sidebar.js';
-import { onReady, showToast, applyFavStyle, updateBulkActions, getFileIcon, escapeHtml, formatDate, getDateGroupLabel } from './utils.js';
+import { onReady, showToast, updateBulkActions, getFileIcon, escapeHtml, formatDate, getDateGroupLabel } from './utils.js';
+import { icon, favIcon } from './icons.js';
 
 
 
@@ -15,14 +16,12 @@ var clSelected = new Set();
 // 초기화
 // ──────────────────────────────────────
 onReady(function() {
-  renderChatListPage();
+  if (document.getElementById('page-chatlist')) renderChatListPage();
 });
 
 document.addEventListener('page:enter', function(e) {
   if (e.detail.page !== 'chatlist') return;
-  // 레이아웃이 비어있으면 다시 렌더링
-  var page = document.getElementById('page-chatlist');
-  if (page && !document.getElementById('cl-body')) renderChatListPage();
+  if (!document.getElementById('cl-body')) renderChatListPage();
   loadChatList();
 });
 
@@ -34,10 +33,10 @@ function renderChatListPage() {
   if (!page) return;
   page.innerHTML =
     '<div id="cl-header">' +
-      '<h2 class="cl-title">💬 채팅 목록</h2>' +
+      '<h2 class="cl-title"><i class="bi bi-chat-square-dots"></i> 채팅 목록</h2>' +
       '<div id="cl-bulk-actions" style="display:none;">' +
         '<span id="cl-selected-count">0개 선택됨</span>' +
-        '<button id="cl-delete-btn" class="cl-danger-btn">🗑 선택 삭제</button>' +
+        '<button id="cl-delete-btn" class="cl-danger-btn"><i class="bi bi-trash"></i> 선택 삭제</button>' +
       '</div>' +
     '</div>' +
     '<div id="cl-body"></div>';
@@ -78,7 +77,7 @@ function renderChatList(sessions) {
   body.innerHTML = '';
 
   if (favorites.length) {
-    body.appendChild(makeGroupLabel('⭐ 즐겨찾기'));
+    body.appendChild(makeGroupLabel('즐겨찾기', 'bi bi-star-fill fav-active'));
     favorites.forEach(function(s) { body.appendChild(makeChatRow(s)); });
   }
 
@@ -95,10 +94,16 @@ function renderChatList(sessions) {
   });
 }
 
-function makeGroupLabel(text) {
+function makeGroupLabel(text, iconClass) {
   var el = document.createElement('div');
   el.className = 'cl-group-label';
-  el.textContent = text;
+  if (iconClass) {
+    var i = document.createElement('i');
+    i.className = iconClass;
+    i.style.marginRight = '4px';
+    el.appendChild(i);
+  }
+  el.appendChild(document.createTextNode(text));
   return el;
 }
 
@@ -128,23 +133,17 @@ function makeChatRow(session) {
   });
 
   var favBtn = document.createElement('button');
-  favBtn.className = 'cl-fav-btn fav-icon-el';
+  favBtn.className = 'cl-fav-btn';
   favBtn.title = session.is_favorite ? '즐겨찾기 해제' : '즐겨찾기 등록';
-  favBtn.style.cssText = 'width:16px;height:16px;padding:0;border:none;cursor:pointer;background:none;flex-shrink:0;';
-  if (typeof _applyFavStyle === 'function') {
-    _applyFavStyle(favBtn, !!session.is_favorite);
-  } else {
-    favBtn.textContent = '★';
-    favBtn.style.color = session.is_favorite ? 'var(--accent)' : 'var(--text-muted)';
-  }
+  favBtn.style.cssText = 'width:32px;height:32px;padding:8px;border:none;cursor:pointer;background:none;flex-shrink:0;display:flex;align-items:center;justify-content:center;';
+  favBtn.innerHTML = favIcon(!!session.is_favorite);
   favBtn.addEventListener('click', async function(e) {
     e.stopPropagation();
     var newFav = session.is_favorite ? 0 : 1;
     try {
       await api('PATCH', '/api/sessions/' + session.id, { is_favorite: newFav });
       session.is_favorite = newFav;
-      if (typeof _applyFavStyle === 'function') _applyFavStyle(favBtn, !!newFav);
-      else { favBtn.style.color = newFav ? 'var(--accent)' : 'var(--text-muted)'; }
+      favBtn.innerHTML = favIcon(!!newFav);
       showToast(newFav ? '즐겨찾기 등록됨' : '즐겨찾기 해제됨');
       loadChatList();
       loadSidebarChatList();
@@ -164,7 +163,7 @@ function makeChatRow(session) {
 
   var delBtn = document.createElement('button');
   delBtn.className = 'cl-del-btn';
-  delBtn.textContent = '🗑';
+  delBtn.innerHTML = '<i class="bi bi-trash"></i>';
   delBtn.title = '삭제';
   delBtn.addEventListener('click', async function(e) {
     e.stopPropagation();

@@ -3,7 +3,8 @@
  */
 import { App, navigateTo, api } from './app.js';
 import { loadSidebarChatList, setDatahubBadge } from './sidebar.js';
-import { escapeHtml, renderMarkdown, getFileIcon, showToast, applyFavStyle, onReady } from './utils.js';
+import { escapeHtml, renderMarkdown, getFileIcon, showToast, onReady } from './utils.js';
+import { icon, favIcon } from './icons.js';
 
 // ──────────────────────────────────────
 // Greeting
@@ -44,9 +45,8 @@ function setHeaderChatTitle(title, loading) {
     var favBtn = document.createElement('button');
     favBtn.id = 'header-fav-btn';
     favBtn.title = '즐겨찾기';
-    favBtn.className = 'fav-icon-el';
-    favBtn.style.cssText = 'display:none;width:16px;height:16px;padding:0;border:none;cursor:pointer;background:none;vertical-align:middle;margin-left:6px;flex-shrink:0;';
-    applyFavStyle(favBtn, false);
+    favBtn.style.cssText = 'display:none;padding:4px;border:none;cursor:pointer;background:none;vertical-align:middle;margin-left:6px;flex-shrink:0;font-size:14px;';
+    favBtn.innerHTML = favIcon(false);
     favBtn.addEventListener('click', toggleFavorite);
     left.appendChild(sep);
     left.appendChild(el);
@@ -73,7 +73,7 @@ function setHeaderChatTitle(title, loading) {
 function setHeaderFavorite(isFavorite) {
   var btn = document.getElementById('header-fav-btn');
   if (!btn) return;
-  applyFavStyle(btn, isFavorite);
+  btn.innerHTML = favIcon(isFavorite);
   btn.dataset.fav = isFavorite ? '1' : '0';
 }
 
@@ -118,7 +118,7 @@ function renderAttachChips() {
     chip.innerHTML =
       '<span class="chip-icon">' + getFileIcon(f.name) + '</span>' +
       '<span class="chip-name">' + escapeHtml(f.name) + '</span>' +
-      '<button class="chip-remove" data-idx="' + idx + '">✕</button>';
+      '<button class="chip-remove" data-idx="' + idx + '"><i class="bi bi-x"></i></button>';
     chip.querySelector('.chip-remove').addEventListener('click', function() {
       attachedFiles.splice(idx, 1);
       renderAttachChips();
@@ -136,14 +136,14 @@ function clearAttachments() {
 // 에이전트 상태 인라인 표시 (3-8)
 // ──────────────────────────────────────
 var AGENT_STATUS = {
-  rag:     '🔍 저장된 문서 검색 중...',
-  vision:  '👁️ 이미지 분석 중...',
-  api:     '🌐 데이터 수집 중...',
+  rag:    '<i class="bi bi-search"></i> 저장된 문서 검색 중...',
+  vision: '<i class="bi bi-eye"></i> 이미지 분석 중...',
+  api:    '<i class="bi bi-globe"></i> 데이터 수집 중...',
 };
 
 function showAgentStatus(type) {
   var label = document.getElementById('indicator-label');
-  if (label && AGENT_STATUS[type]) label.textContent = AGENT_STATUS[type];
+  if (label && AGENT_STATUS[type]) label.innerHTML = AGENT_STATUS[type];
 }
 
 // ──────────────────────────────────────
@@ -211,7 +211,7 @@ function renderChatPage() {
     '<div id="chat-input-area">' +
       '<div id="chat-attachments"></div>' +
       '<div id="chat-input-row">' +
-        '<label id="attach-btn" title="파일 첨부">\uD83D\uDCCE' +
+        '<label id="attach-btn" title="파일 첨부"><i class="bi bi-paperclip"></i>' +
           '<input type="file" id="file-input" multiple style="display:none;"/>' +
         '</label>' +
         '<textarea id="chat-input" placeholder="\uba54\uc2dc\uc9c0\ub97c \uc785\ub825\ud558\uc138\uc694..." rows="1"></textarea>' +
@@ -412,15 +412,17 @@ function createThinkingPanel() {
   panel.className = 'thinking-panel collapsed';
   panel.innerHTML =
     '<button class="thinking-toggle">' +
-      '<span class="thinking-icon">💭</span>' +
+      '<span class="thinking-icon"><i class="bi bi-patch-question"></i></span>' +
       '<span class="thinking-label">추론 중...</span>' +
-      '<span class="thinking-chevron">›</span>' +
+      '<span class="thinking-chevron"><i class="bi bi-chevron-right"></i></span>' +
     '</button>' +
     '<div class="thinking-content"></div>';
   panel.querySelector('.thinking-toggle').addEventListener('click', function() {
     panel.classList.toggle('collapsed');
-    panel.querySelector('.thinking-chevron').textContent =
-      panel.classList.contains('collapsed') ? '›' : '⌄';
+    panel.querySelector('.thinking-chevron').innerHTML =
+      panel.classList.contains('collapsed')
+        ? '<i class="bi bi-chevron-right"></i>'
+        : '<i class="bi bi-chevron-down"></i>';
   });
   return panel;
 }
@@ -438,8 +440,8 @@ function makeActions(content, isAssistant) {
   var div = document.createElement('div');
   div.className = 'msg-actions';
   div.innerHTML =
-    '<button class="msg-action-btn" title="복사">⎘</button>' +
-    (isAssistant ? '<button class="msg-action-btn regen-btn" title="재생성">↺</button>' : '');
+    '<button class="msg-action-btn" title="복사"><i class="bi bi-copy"></i></button>' +
+    (isAssistant ? '<button class="msg-action-btn regen-btn" title="재생성"><i class="bi bi-arrow-counterclockwise"></i></button>' : '');
   var btns = div.querySelectorAll('.msg-action-btn');
   btns[0].addEventListener('click', function() {
     navigator.clipboard.writeText(content).then(function() { showToast('복사됨'); });

@@ -481,3 +481,7 @@ body.sidebar-collapsed #header {
     padding-left: var(--sidebar-collapsed-width);
   }
 }
+
+/* ── Bootstrap Icons 즐겨찾기 색상 */
+.fav-active   { color: var(--accent); }
+.fav-inactive { color: var(--text-muted); }

@@ -4,6 +4,7 @@
  */
 import { api } from './app.js';
 import { onReady, showToast } from './utils.js';
+import { icon } from './icons.js';
 
 // ──────────────────────────────────────
 // 상태
@@ -32,13 +33,13 @@ function renderSettingsPage() {
   if (!page) return;
 
   const menus = [
-    { id: 'sec-models',    icon: '🤖', label: '모델' },
-    { id: 'sec-inference', icon: '🧠', label: '추론 파라미터' },
-    { id: 'sec-context',   icon: '💾', label: '컨텍스트' },
-    { id: 'sec-rag',       icon: '📚', label: 'RAG' },
-    { id: 'sec-prompt',    icon: '💬', label: '시스템 프롬프트' },
-    { id: 'sec-app',       icon: '🎨', label: '앱 외관' },
-    { id: 'sec-ext',       icon: '🔗', label: '확장' },
+    { id: 'sec-models',    icon: '<i class="bi bi-cpu"></i>',             label: '모델' },
+    { id: 'sec-inference', icon: '<i class="bi bi-brain"></i>',           label: '추론 파라미터' },
+    { id: 'sec-context',   icon: '<i class="bi bi-hdd"></i>',             label: '컨텍스트' },
+    { id: 'sec-rag',       icon: '<i class="bi bi-book"></i>',            label: 'RAG' },
+    { id: 'sec-prompt',    icon: '<i class="bi bi-chat-square-text"></i>', label: '시스템 프롬프트' },
+    { id: 'sec-app',       icon: '<i class="bi bi-palette"></i>',         label: '앱 외관' },
+    { id: 'sec-ext',       icon: '<i class="bi bi-link-45deg"></i>',      label: '확장' },
   ];
 
   page.innerHTML =
@@ -62,6 +63,12 @@ function renderSettingsPage() {
         ).join('') +
       '</div>' +
     '</div>';
+
+  // 아이콘 주입
+  page.querySelectorAll('[data-section]').forEach(el => {
+    const icon = SECTION_ICONS[el.dataset.section];
+    if (icon) el.appendChild(createIcon(icon, 16));
+  });
 
   // 좌측 메뉴 클릭 → 해당 섹션 스크롤
   page.querySelectorAll('.st-nav-btn').forEach(btn => {
@@ -277,14 +284,16 @@ async function renderModelsSection() {
 async function updateVisionHint(modelName) {
   const badge = document.getElementById('st-cap-badge');
   if (!badge || !modelName) return;
-  badge.textContent = '⏳ capabilities 확인 중...';
+  badge.innerHTML = '<i class="bi bi-clock"></i> capabilities 확인 중...';
   try {
     const caps = await api('GET', `/api/models/capabilities?model=${encodeURIComponent(modelName)}`);
     const tags = [];
-    if (caps.thinking) tags.push('🧠 thinking');
-    if (caps.vision)   tags.push('👁 vision');
-    if (caps.tools)    tags.push('🔧 tools');
-    badge.textContent = tags.length ? `${modelName}: ${tags.join(' · ')}` : `${modelName}: completion only`;
+    if (caps.thinking) tags.push('<i class="bi bi-brain"></i> thinking');
+    if (caps.vision)   tags.push('<i class="bi bi-eye"></i> vision');
+    if (caps.tools)    tags.push('<i class="bi bi-tools"></i> tools');
+    badge.innerHTML = tags.length
+      ? `${modelName}: ${tags.join(' · ')}`
+      : `${modelName}: completion only`;
 
     // thinking 지원 여부에 따라 추론 섹션 think 토글 상태 업데이트
     updateThinkToggleState(caps.thinking);
@@ -295,7 +304,7 @@ async function updateVisionHint(modelName) {
       if (visSel && visSel.value !== modelName) {
         const hint = document.createElement('p');
         hint.className = 'st-hint';
-        hint.textContent = `💡 ${modelName}이 vision을 지원합니다. 시각 모델을 동일하게 설정하면 인스턴스를 공유합니다.`;
+        hint.innerHTML = `<i class="bi bi-lightbulb"></i> ${modelName}이 vision을 지원합니다. 시각 모델을 동일하게 설정하면 인스턴스를 공유합니다.`;
         hint.id = 'st-vision-hint';
         const old = document.getElementById('st-vision-hint');
         if (old) old.remove();
@@ -318,7 +327,7 @@ function showModelChangeNotice() {
     notice.className = 'st-notice';
     el.appendChild(notice);
   }
-  notice.textContent = '⚠️ 모델 변경은 새 채팅부터 적용됩니다.';
+  notice.innerHTML = '<i class="bi bi-exclamation-triangle"></i> 모델 변경은 새 채팅부터 적용됩니다.';
   clearTimeout(notice._timer);
   notice._timer = setTimeout(() => notice.remove(), 5000);
 }
