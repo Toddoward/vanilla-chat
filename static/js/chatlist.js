@@ -35,6 +35,8 @@ function renderChatListPage() {
     '<div id="cl-header">' +
       '<h2 class="cl-title"><i class="bi bi-chat-square-dots"></i> 채팅 목록</h2>' +
       '<div id="cl-bulk-actions" style="display:none;">' +
+        '<button id="cl-select-all-btn" class="cl-action-btn"><i class="bi bi-check-all"></i> 전체 선택</button>' +
+        '<button id="cl-deselect-btn" class="cl-action-btn"><i class="bi bi-x-lg"></i> 전체 해제</button>' +
         '<span id="cl-selected-count">0개 선택됨</span>' +
         '<button id="cl-delete-btn" class="cl-danger-btn"><i class="bi bi-trash"></i> 선택 삭제</button>' +
       '</div>' +
@@ -43,6 +45,26 @@ function renderChatListPage() {
 
   document.getElementById('cl-delete-btn')
     ?.addEventListener('click', deleteSelectedChats);
+
+  document.getElementById('cl-select-all-btn')
+    ?.addEventListener('click', function() {
+      document.querySelectorAll('.cl-row').forEach(function(row) {
+        var id = String(row.dataset.sessionId);
+        clSelected.add(id);
+        var icon = row.querySelector('.cl-check-icon');
+        if (icon) icon.classList.add('checked');
+      });
+      updateBulkActions('cl-bulk-actions', 'cl-selected-count', clSelected);
+    });
+
+  document.getElementById('cl-deselect-btn')
+    ?.addEventListener('click', function() {
+      clSelected.clear();
+      document.querySelectorAll('.cl-check-icon').forEach(function(icon) {
+        icon.classList.remove('checked');
+      });
+      updateBulkActions('cl-bulk-actions', 'cl-selected-count', clSelected);
+    });
 }
 
 // ──────────────────────────────────────
@@ -175,7 +197,48 @@ function makeChatRow(session) {
     document.dispatchEvent(new CustomEvent('chat:deleted'));
   });
 
-  row.append(checkBtn, favBtn, info, delBtn);
+  var editBtn = document.createElement('button');
+  editBtn.className = 'cl-edit-btn';
+  editBtn.innerHTML = '<i class="bi bi-pencil"></i>';
+  editBtn.title = '제목 수정';
+  editBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    if (title.querySelector('input')) return;
+    var current = session.title || '새 대화';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.value = current;
+    input.className = 'cl-title-input';
+    title.textContent = '';
+    title.appendChild(input);
+    input.focus();
+    input.select();
+
+    async function saveTitle() {
+      var newTitle = input.value.trim();
+      if (!newTitle) newTitle = current;
+      title.textContent = newTitle;
+      session.title = newTitle;
+      if (newTitle !== current) {
+        try {
+          await api('PATCH', '/api/sessions/' + session.id, { title: newTitle });
+          loadSidebarChatList();
+          showToast('제목 변경됨');
+        } catch(err) {
+          showToast('제목 변경 실패', 'error');
+          title.textContent = current;
+          session.title = current;
+        }
+      }
+    }
+    input.addEventListener('blur', saveTitle);
+    input.addEventListener('keydown', function(e2) {
+      if (e2.key === 'Enter')  { e2.preventDefault(); input.blur(); }
+      if (e2.key === 'Escape') { title.textContent = current; }
+    });
+  });
+
+  row.append(checkBtn, favBtn, info, editBtn, delBtn);
 
   // 행 클릭 → 해당 채팅으로 이동
   row.addEventListener('click', function(e) {
@@ -217,6 +280,8 @@ var clCSS =
 '#cl-bulk-actions{align-items:center;gap:10px;}' +
 '#cl-selected-count{font-size:var(--font-size-sm);color:var(--accent);}' +
 '.cl-danger-btn{padding:5px 12px;border-radius:var(--radius-md);background:var(--danger-dim);color:var(--danger);font-size:var(--font-size-xs);border:1px solid var(--danger);cursor:pointer;}' +
+'.cl-action-btn{padding:5px 10px;border-radius:var(--radius-md);background:var(--bg-tertiary);color:var(--text-secondary);font-size:var(--font-size-xs);border:1px solid var(--border);cursor:pointer;transition:color 0.15s;}' +
+'.cl-action-btn:hover{color:var(--text-primary);}' +
 '#cl-body{flex:1;overflow-y:auto;padding:8px 24px 24px;}' +
 '.cl-group-label{font-size:var(--font-size-xs);font-weight:600;color:var(--text-muted);padding:16px 0 6px;text-transform:uppercase;letter-spacing:0.05em;}' +
 '.cl-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius-md);border:1px solid var(--border-subtle);margin-bottom:4px;background:var(--bg-secondary);cursor:pointer;transition:background 0.15s;}' +
@@ -229,10 +294,16 @@ var clCSS =
 '.cl-fav-btn:hover{opacity:1;}' +
 '.cl-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}' +
 '.cl-title-text{font-size:var(--font-size-sm);font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+'.cl-title-input{background:var(--bg-tertiary);border:1px solid var(--accent);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm);padding:2px 6px;width:180px;outline:none;}' +
 '.cl-meta{font-size:var(--font-size-xs);color:var(--text-muted);}' +
+'.cl-edit-btn{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:4px 6px;border-radius:var(--radius-sm);transition:color 0.15s;opacity:0;}' +
+'.cl-row:hover .cl-edit-btn{opacity:1;}' +
+'.cl-edit-btn:hover{color:var(--accent);}' +
 '.cl-del-btn{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:4px 6px;border-radius:var(--radius-sm);transition:color 0.15s;}' +
 '.cl-del-btn:hover{color:var(--danger);}' +
-'.cl-empty{text-align:center;padding:60px 20px;color:var(--text-muted);font-size:var(--font-size-sm);}';
+'.cl-empty{text-align:center;padding:60px 20px;color:var(--text-muted);font-size:var(--font-size-sm);}' +
+'.cl-row:hover .cl-del-btn{color:var(--text-muted);}' +
+'#cl-selected-count{font-size:var(--font-size-sm);color:var(--accent);}';
 
 var _clStyle = document.createElement('style');
 _clStyle.textContent = clCSS;

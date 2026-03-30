@@ -562,6 +562,27 @@ class ChatRequest(BaseModel):
     is_regenerate: bool = False
 
 
+ABORT_PLACEHOLDER = "_(응답이 중단되었습니다)_"
+FAIL_PLACEHOLDER  = "_(추론 중 응답 생성에 실패했습니다. 재생성을 시도해 주세요)_"
+
+
+def _extract_thinking_and_response(text: str) -> tuple[str | None, str]:
+    """
+    full_response 텍스트에서 thinking과 response를 분리.
+    - </think> 있는 정상 케이스: thinking + response 분리
+    - </think> 없이 중단된 케이스: 전체를 thinking으로, response는 빈 문자열
+    - <think> 없는 케이스: thinking=None, 전체가 response
+    """
+    import re as _re
+    match = _re.search(r'<think>(.*?)</think>(.*)', text, flags=_re.DOTALL)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    open_match = _re.search(r'<think>(.*)', text, flags=_re.DOTALL)
+    if open_match:
+        return open_match.group(1).strip(), ""
+    return None, text.strip()
+
+
 @app.post("/api/chat")
 async def api_chat(body: ChatRequest, background: BackgroundTasks):
     session = get_session(body.session_id)
@@ -595,7 +616,8 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
     async def event_stream():
         full_response = []
-        summarizing = False
+        summarizing   = False
+        _saved        = False
 
         try:
             # 요약 필요 여부 선제 확인
@@ -619,15 +641,9 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                 yield "data: " + json.dumps({"type": "chunk", "content": chunk}) + "\n\n"
 
             response_text = "".join(full_response)
-
-            # thinking 추출 + <think> 태그 제거 후 DB 저장
-            import re as _re
-            thinking_match = _re.search(r'<think>(.*?)</think>', response_text, flags=_re.DOTALL)
-            thinking_text  = thinking_match.group(1).strip() if thinking_match else None
-            clean_response = _re.sub(
-                r'<think>.*?</think>', '', response_text, flags=_re.DOTALL
-            ).strip()
+            thinking_text, clean_response = _extract_thinking_and_response(response_text)
             add_message(body.session_id, "assistant", clean_response, thinking=thinking_text)
+            _saved = True
 
             # 컨텍스트 히스토리 갱신 (think 제거본으로)
             ctx.add_exchange(body.message, clean_response)
@@ -647,6 +663,29 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
         except Exception as e:
             logger.error("채팅 오류 [session=%d]: %s", body.session_id, e)
             yield "data: " + json.dumps({"type": "error", "message": str(e)}) + "\n\n"
+
+        finally:
+            if not _saved:
+                import asyncio as _asyncio
+                raw = "".join(full_response)
+                thinking_text, _ = _extract_thinking_and_response(raw)
+                import sys as _sys
+                exc = _sys.exc_info()[1]
+                is_abort = isinstance(exc, (_asyncio.CancelledError, GeneratorExit))
+                placeholder = ABORT_PLACEHOLDER if is_abort else FAIL_PLACEHOLDER
+                try:
+                    add_message(body.session_id, "assistant", placeholder, thinking=thinking_text)
+                    logger.info("중단/실패 메시지 저장 [session=%d]: %s", body.session_id, placeholder)
+                except Exception as save_err:
+                    logger.warning("중단/실패 저장 오류 [session=%d]: %s", body.session_id, save_err)
+                # 첫 메시지 중단 시 fallback 제목 저장
+                if is_first_message:
+                    try:
+                        fallback_title = body.message.strip()[:20]
+                        update_session(body.session_id, title=fallback_title)
+                        logger.info("첫 메시지 중단 fallback 제목 저장 [session=%d]: %s", body.session_id, fallback_title)
+                    except Exception as title_err:
+                        logger.warning("fallback 제목 저장 오류 [session=%d]: %s", body.session_id, title_err)
 
     return StreamingResponse(
         event_stream(),

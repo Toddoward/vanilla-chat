@@ -6,6 +6,12 @@ import { loadSidebarChatList, setDatahubBadge } from './sidebar.js';
 import { escapeHtml, renderMarkdown, getFileIcon, showToast, onReady } from './utils.js';
 import { icon, favIcon } from './icons.js';
 
+// 백엔드와 동기화된 placeholder 상수
+var PLACEHOLDERS = [
+  '_(응답이 중단되었습니다)_',
+  '_(추론 중 응답 생성에 실패했습니다. 재생성을 시도해 주세요)_',
+];
+
 // ──────────────────────────────────────
 // Greeting
 // ──────────────────────────────────────
@@ -41,7 +47,10 @@ function setHeaderChatTitle(title, loading) {
     sep.textContent = '/';
     el = document.createElement('span');
     el.id = 'header-chat-title';
-    // 즐겨찾기 버튼 — 제목 오른쪽
+    el.title = '클릭하여 제목 수정';
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', function() { startHeaderTitleEdit(); });
+    // 즐겨찾기 버튼
     var favBtn = document.createElement('button');
     favBtn.id = 'header-fav-btn';
     favBtn.title = '즐겨찾기';
@@ -68,6 +77,42 @@ function setHeaderChatTitle(title, loading) {
     var fb2 = document.getElementById('header-fav-btn');
     if (fb2) fb2.style.display = 'none';
   }
+}
+
+function startHeaderTitleEdit() {
+  if (!currentSessionId) return;
+  var el = document.getElementById('header-chat-title');
+  if (!el || el.querySelector('input')) return;
+  var current = el.textContent.trim();
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.value = current;
+  input.style.cssText = 'background:var(--bg-tertiary);border:1px solid var(--accent);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm);padding:2px 6px;width:200px;outline:none;';
+  el.innerHTML = '';
+  el.appendChild(input);
+  input.focus();
+  input.select();
+
+  async function saveTitle() {
+    var newTitle = input.value.trim();
+    if (!newTitle) newTitle = current;
+    el.textContent = escapeHtml(newTitle);
+    if (newTitle !== current) {
+      try {
+        await api('PATCH', '/api/sessions/' + currentSessionId, { title: newTitle });
+        loadSidebarChatList();
+        showToast('제목 변경됨');
+      } catch(e) {
+        showToast('제목 변경 실패', 'error');
+        el.textContent = current;
+      }
+    }
+  }
+  input.addEventListener('blur', saveTitle);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { el.textContent = current; }
+  });
 }
 
 function setHeaderFavorite(isFavorite) {
@@ -335,14 +380,14 @@ async function loadSession(sessionId) {
     if (!data.messages || !data.messages.length) { showGreeting(); return; }
     data.messages.forEach(function(msg) {
       if (msg.role === 'system') return;
-      // thinking이 저장된 assistant 메시지는 패널 먼저 렌더링
       if (msg.role === 'assistant' && msg.thinking) {
         var tp = createThinkingPanel();
         finalizeThinkingPanel(tp, msg.thinking);
         var chatEl = document.getElementById('chat-messages');
         if (chatEl) chatEl.appendChild(tp);
       }
-      appendMessage(msg.role, msg.content, false);
+      var isPlaceholder = msg.role === 'assistant' && PLACEHOLDERS.includes((msg.content || '').trim());
+      appendMessage(msg.role, msg.content, false, isPlaceholder);
     });
     updateLatestLogo();
     scrollToBottom();
@@ -459,7 +504,7 @@ function makeActions(content, isAssistant) {
   return div;
 }
 
-function appendMessage(role, content, animate) {
+function appendMessage(role, content, animate, isPlaceholder) {
   if (animate === undefined) animate = true;
   var el = document.getElementById('chat-messages');
   document.getElementById('greeting-screen') && document.getElementById('greeting-screen').remove();
@@ -476,7 +521,11 @@ function appendMessage(role, content, animate) {
 
   var bubble = document.createElement('div');
   bubble.className = 'bubble ' + role;
-  bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : '<p>' + escapeHtml(content) + '</p>';
+  if (role === 'assistant' && isPlaceholder) {
+    bubble.innerHTML = '<span style="color:var(--text-muted)">' + renderMarkdown(content) + '</span>';
+  } else {
+    bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : '<p>' + escapeHtml(content) + '</p>';
+  }
   wrap.appendChild(bubble);
   wrap.appendChild(makeActions(content, role === 'assistant'));
   el.appendChild(wrap);
@@ -599,14 +648,17 @@ async function sendMessage(isRegenerate) {
           removeLogoIndicator();
           // 추론만 하고 실제 응답이 없는 경우 → 실패 처리
           if (!st.response || !st.response.trim()) {
-            var failMsg = '_(추론 중 응답 생성에 실패했습니다. 재생성을 시도해 주세요)_';
-            if (streamBubble) {
-              streamBubble.innerHTML = '<span style="color:var(--text-muted)">' + renderMarkdown(failMsg) + '</span>';
+            // streamBubble이 없으면 새로 생성 (</think> 없이 종료된 추론 교착 케이스)
+            if (!streamBubble) {
+              var res = appendStreamingBubble();
+              streamWrap = res.wrap; streamBubble = res.bubble;
+              updateLatestLogo();
             }
+            var failMsg = '_(추론 중 응답 생성에 실패했습니다. 재생성을 시도해 주세요)_';
+            streamBubble.innerHTML = '<span style="color:var(--text-muted)">' + renderMarkdown(failMsg) + '</span>';
             if (streamWrap) {
               streamWrap.removeAttribute('id');
               streamWrap.appendChild(makeActions('', true));
-              updateLatestLogo();
             }
           } else {
             if (streamBubble) streamBubble.innerHTML = renderMarkdown(st.response);
