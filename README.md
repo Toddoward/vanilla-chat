@@ -99,6 +99,30 @@
 
 ---
 
+## 빠른 시작 (원클릭)
+
+Python, Ollama, 모델 다운로드, 앱 실행까지 자동으로 처리합니다.
+
+**Windows**
+```
+start.bat 더블클릭
+```
+
+**macOS / Linux**
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+스크립트가 자동으로 수행하는 작업:
+1. Python 3.12+ 확인 및 설치 (없을 시 winget/brew/apt 사용)
+2. Ollama 확인 및 설치
+3. 가상환경 생성 및 의존성 설치
+4. `app_config.yaml`에 설정된 모델 자동 pull
+5. `http://localhost:8000` 에서 앱 시작
+
+---
+
 ## 설치 방법
 
 ### 1. 저장소 클론

@@ -36,5 +36,4 @@ build/
 *.log
 
 # mics
-*.sh
 /storage/uploads_tmp/*
