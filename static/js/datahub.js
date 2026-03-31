@@ -204,6 +204,7 @@ function renderFileList(files) {
       (f.status === 'BROKEN'
         ? '<button class="dh-reregister-btn" data-id="' + f.id + '">재등록</button>'
         : '') +
+      '<button class="dh-open-btn" data-id="' + f.id + '" title="파일 열기"><i class="bi bi-box-arrow-up-right"></i></button>' +
       '<button class="dh-delete-btn" data-id="' + f.id + '"><i class="bi bi-trash"></i></button>';
 
     // 체크박스
@@ -211,6 +212,15 @@ function renderFileList(files) {
       if (e.target.checked) dhSelectedFiles.add(f.id);
       else dhSelectedFiles.delete(f.id);
       updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
+    });
+
+    // 파일 열기
+    row.querySelector('.dh-open-btn').addEventListener('click', async function() {
+      try {
+        await api('POST', '/api/files/' + f.id + '/open', {});
+      } catch(e) {
+        showToast('파일을 열 수 없습니다. 경로를 확인하세요.', 'error');
+      }
     });
 
     // 삭제
@@ -507,6 +517,8 @@ var dhCSS =
 '.dh-ghost-btn{padding:6px 14px;border-radius:var(--radius-md);background:none;color:var(--text-secondary);font-size:var(--font-size-sm);border:1px solid var(--border);cursor:pointer;transition:all 0.15s;}' +
 '.dh-ghost-btn:hover{border-color:var(--text-secondary);}' +
 '.dh-danger-btn{padding:5px 12px;border-radius:var(--radius-md);background:var(--danger-dim);color:var(--danger);font-size:var(--font-size-xs);border:1px solid var(--danger);cursor:pointer;}' +
+'.dh-open-btn{flex-shrink:0;padding:4px 8px;border-radius:var(--radius-sm);background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;transition:color 0.15s;}' +
+'.dh-open-btn:hover{color:var(--accent);}' +
 '.dh-delete-btn{flex-shrink:0;padding:4px 8px;border-radius:var(--radius-sm);background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;transition:color 0.15s;}' +
 '.dh-delete-btn:hover{color:var(--danger);}' +
 '.dh-reregister-btn{flex-shrink:0;padding:3px 8px;border-radius:var(--radius-sm);background:var(--warning-dim);color:var(--warning);border:1px solid var(--warning);font-size:var(--font-size-xs);cursor:pointer;}' +

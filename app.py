@@ -351,6 +351,29 @@ async def api_delete_file(file_id: int):
     return {"deleted": file_id}
 
 
+@app.post("/api/files/{file_id}/open")
+async def api_open_file(file_id: int):
+    """OS 기본 앱으로 파일 열기."""
+    record = get_file_link(file_id)
+    if not record:
+        raise HTTPException(404, "파일 없음")
+    path = record["original_path"]
+    if not Path(path).exists():
+        raise HTTPException(404, f"파일을 찾을 수 없습니다: {path}")
+    try:
+        import sys as _sys, subprocess as _sub
+        if _sys.platform == "win32":
+            import os as _os
+            _os.startfile(path)
+        elif _sys.platform == "darwin":
+            _sub.Popen(["open", path])
+        else:
+            _sub.Popen(["xdg-open", path])
+        return {"opened": path}
+    except Exception as e:
+        raise HTTPException(500, f"파일 열기 실패: {e}")
+
+
 @app.post("/api/files/upload")
 async def api_upload_file(background: BackgroundTasks, file: UploadFile = File(...)):
     """브라우저에서 파일 업로드 → 임시 저장 → 등록 파이프라인 실행."""
