@@ -108,18 +108,16 @@ class OllamaProvider(BaseProvider):
         stream: bool = True,
         think: bool = True,
         inference_config: dict | None = None,
+        tools: list[dict] | None = None,
     ) -> AsyncGenerator[str, None]:
         cfg = inference_config or {}
 
-        # 공통 파라미터만 options로 추출 (pass-through)
         options = {k: v for k, v in cfg.items() if k in COMMON_OPTIONS}
-        # 기본값 보장
         options.setdefault("temperature",    0.6)
         options.setdefault("num_predict",    2048)
         options.setdefault("top_p",          0.9)
         options.setdefault("repeat_penalty", 1.1)
 
-        # think 파라미터: capabilities 확인 후 조건부 최상단 레벨 전달
         payload: dict = {
             "model":    self.model_name,
             "messages": messages,
@@ -128,8 +126,11 @@ class OllamaProvider(BaseProvider):
         }
         caps = await self.get_capabilities()
         if caps.get("thinking"):
-            payload["think"] = bool(think)  # True/False 모두 명시적 전달
-        # think_cap == None 이면 payload에 think 미포함
+            payload["think"] = bool(think)
+
+        # tools 전달 — tools capability 있을 때만
+        if tools and caps.get("tools"):
+            payload["tools"] = tools
 
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream(
@@ -159,6 +160,11 @@ class OllamaProvider(BaseProvider):
                                 yield "</think>"
                                 thinking_ended = True
                             yield content_chunk
+
+                        # tool_calls 감지 — 호출자가 처리할 수 있도록 특수 토큰으로 yield
+                        tool_calls = msg.get("tool_calls")
+                        if tool_calls:
+                            yield "\x00TOOL_CALLS\x00" + json.dumps(tool_calls)
 
                         if data.get("done"):
                             if thinking_started and not thinking_ended:
@@ -213,35 +219,63 @@ class ModelManager:
 
     def __init__(self):
         self._providers: dict[str, BaseProvider] = {}
-        self._slots: dict[str, str] = {}       # slot_name -> model_name
+        self._slots: dict[str, str] = {}
         self._vision_supported: dict[str, bool] = {}
-        self.context_length: int = 4096        # Ollama /api/show에서 갱신
+        self.context_length: int = 4096
         self.is_connected: bool = False
 
     def init(self, config: dict) -> None:
         """앱 시작 시 config를 받아 슬롯 초기화."""
         models_cfg = config.get("models", {})
         self._slots = {
-            "response":  models_cfg.get("response",  "qwen3.5"),
-            "vision":    models_cfg.get("vision",    "qwen3.5"),
-            "embedding": models_cfg.get("embedding", "bge-m3"),
-            "reranker":  models_cfg.get("reranker",  "bge-reranker-v2-m3"),
+            "orchestrator": models_cfg.get("orchestrator", ""),
+            "response":     models_cfg.get("response",     "qwen3.5"),
+            "vision":       models_cfg.get("vision",       "qwen3.5"),
+            "embedding":    models_cfg.get("embedding",    "bge-m3"),
+            "reranker":     models_cfg.get("reranker",     "bge-reranker-v2-m3"),
         }
 
-        # 동일 모델명이면 인스턴스 공유
-        unique_models = set(self._slots.values())
+        # 동일 모델명이면 인스턴스 공유 (빈 문자열 슬롯 제외)
+        unique_models = {m for m in self._slots.values() if m}
         for model_name in unique_models:
             self._providers[model_name] = OllamaProvider(model_name)
 
         logger.info("모델 슬롯 초기화: %s", self._slots)
 
-    def get(self, slot: str) -> BaseProvider:
-        model_name = self._slots.get(slot, "qwen3.5")
-        return self._providers[model_name]
+    def get(self, slot: str) -> "BaseProvider | None":
+        model_name = self._slots.get(slot, "")
+        if not model_name:
+            return None
+        return self._providers.get(model_name)
+
+    async def get_orchestrator(self) -> "BaseProvider | None":
+        """
+        오케스트레이터 provider 반환.
+        tools capability 없으면 None (이중 검증).
+        """
+        provider = self.get("orchestrator")
+        if provider is None:
+            return None
+        try:
+            caps = await provider.get_capabilities()
+            if not caps.get("tools"):
+                logger.warning(
+                    "오케스트레이터 모델 '%s'에 tools capability 없음 → fallback",
+                    self._slots.get("orchestrator")
+                )
+                return None
+        except Exception as e:
+            logger.warning("오케스트레이터 capability 조회 실패: %s", e)
+            return None
+        return provider
 
     @property
     def response_model_name(self) -> str:
         return self._slots.get("response", "unknown")
+
+    @property
+    def orchestrator_model_name(self) -> str:
+        return self._slots.get("orchestrator", "")
 
     def vision_available(self) -> bool:
         return self._vision_supported.get(self._slots.get("vision", ""), True)

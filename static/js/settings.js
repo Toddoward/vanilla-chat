@@ -265,7 +265,15 @@ async function renderModelsSection() {
 
   const responseModels  = filtered(c => c.completion && !c.embedding);
   const visionModels    = filtered(c => c.completion && c.vision && !c.embedding);
-  // 방법 B: embedding capability 있으면서 이름에 reranker가 없는 모델만
+  // tools capability 있는 모델만 — 빈 선택(오케스트레이터 없음) 포함
+  const orchestratorModels = [
+    '(사용 안 함)',
+    ...allModelNames.filter(name => {
+      const caps = _allCaps[name];
+      return caps ? (caps.tools && !caps.embedding) : false;
+    }),
+  ];
+  // embedding capability 있으면서 이름에 reranker가 없는 모델만
   const embeddingModels = filtered(c => c.embedding)
     .filter(name => !name.toLowerCase().includes('reranker'));
 
@@ -279,10 +287,11 @@ async function renderModelsSection() {
   ];
 
   const slots = [
-    { key: 'response',  label: '응답 모델',   desc: '텍스트 생성 모델',                       list: responseModels },
-    { key: 'vision',    label: '시각 모델',   desc: 'response와 동일하면 인스턴스 공유',           list: visionModels },
-    { key: 'embedding', label: '임베딩 모델', desc: 'BGE-M3 권장',                           list: embeddingModels },
-    { key: 'reranker',  label: '리랭커 모델', desc: 'FlagEmbedding 또는 Ollama reranker 모델', list: rerankerModels },
+    { key: 'orchestrator', label: '오케스트레이터', desc: 'tools capability 필수 — 도구 선택 라우팅 전담 (qwen3.5:0.8b 권장)', list: orchestratorModels },
+    { key: 'response',     label: '응답 모델',      desc: '텍스트 생성 모델',                                                    list: responseModels },
+    { key: 'vision',       label: '시각 모델',      desc: 'response와 동일하면 인스턴스 공유',                                      list: visionModels },
+    { key: 'embedding',    label: '임베딩 모델',    desc: 'BGE-M3 권장',                                                        list: embeddingModels },
+    { key: 'reranker',     label: '리랭커 모델',    desc: 'FlagEmbedding 또는 Ollama reranker 모델',                             list: rerankerModels },
   ];
 
   for (const slot of slots) {
@@ -290,6 +299,8 @@ async function renderModelsSection() {
     // 리랭커 슬롯: 고정 항목의 표시값과 실제 저장값을 매핑
     const displayCurrent = (slot.key === 'reranker' && current === 'bge-reranker-v2-m3')
       ? 'bge-reranker-v2-m3 (FlagEmbedding)'
+      : (slot.key === 'orchestrator' && current === '')
+      ? '(사용 안 함)'
       : current;
     const sel = makeSelect(
       `st-model-${slot.key}`,
@@ -297,8 +308,10 @@ async function renderModelsSection() {
       displayCurrent,
       async (val) => {
         // 리랭커 고정 항목 선택 시 실제 저장값으로 변환
-        const saveVal = (slot.key === 'reranker' && val === 'bge-reranker-v2-m3 (FlagEmbedding)')
+      const saveVal = (slot.key === 'reranker' && val === 'bge-reranker-v2-m3 (FlagEmbedding)')
           ? 'bge-reranker-v2-m3'
+          : (slot.key === 'orchestrator' && val === '(사용 안 함)')
+          ? ''
           : val;
         scheduleSave(`models.${slot.key}`, saveVal, () => showModelChangeNotice());
         if (slot.key === 'response') await updateVisionHint(val);

@@ -203,10 +203,28 @@ async def get_status():
     """헤더 모델 연결 상태 확인용."""
     connected, _ = await check_ollama_connection()
     model_manager.is_connected = connected
+    from core.database import get_embedding_dim
+    from core.file_engine import get_bge_model
+    stored_dim = get_embedding_dim()
+    # 현재 임베딩 모델 차원 조회 (로드된 경우만)
+    current_dim = None
+    try:
+        bge = get_bge_model()
+        if bge is not None:
+            current_dim = bge.get_sentence_embedding_dimension()
+    except Exception:
+        pass
+    dim_mismatch = (
+        stored_dim is not None and
+        current_dim is not None and
+        stored_dim != current_dim
+    )
     return {
         "connected": connected,
         "model": model_manager.response_model_name,
         "context_length": model_manager.context_length,
+        "embedding_dim": stored_dim,
+        "dim_mismatch": dim_mismatch,
     }
 
 
@@ -408,6 +426,20 @@ async def _run_register_file(file_id: int, path: str, display_name: str, config:
         logger.error("파일 등록 실패 [file_id=%d]: %s", file_id, e)
 
 
+@app.post("/api/files/reembed")
+async def api_reembed_all(background: BackgroundTasks):
+    """모든 파일 재임베딩 (임베딩 모델 교체 후 차원 불일치 해소)."""
+    from core.file_engine import reembed_all_files
+    config = load_config()
+
+    async def _run():
+        result = await reembed_all_files(config)
+        logger.info("전체 재임베딩 완료: %s", result)
+
+    background.add_task(_run)
+    return {"status": "started"}
+
+
 # ──────────────────────────────────────────
 # 외부 API CRUD  (4-3)
 # ──────────────────────────────────────────
@@ -560,6 +592,8 @@ class ChatRequest(BaseModel):
     session_id: int
     message: str
     is_regenerate: bool = False
+    images: list[dict] = []        # [{ "name": str, "data": str (base64) }]
+    upload_paths: list[dict] = []  # [{ "name": str, "tmp_path": str }]
 
 
 ABORT_PLACEHOLDER = "_(응답이 중단되었습니다)_"
@@ -589,13 +623,13 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
     if not session:
         raise HTTPException(404, "세션 없음")
 
-    config = load_config()
-    app_name      = config.get("app", {}).get("name", "Vanilla Chat")
-    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
-    system_prompt = system_prompt.replace("$(name)", app_name)
+    config           = load_config()
+    app_name         = config.get("app", {}).get("name", "Vanilla Chat")
+    system_prompt    = config.get("system_prompt", "You are a helpful assistant.")
+    system_prompt    = system_prompt.replace("$(name)", app_name)
     inference_config = config.get("inference", {})
     think_enabled    = inference_config.get("think", True)
-    provider = model_manager.get("response")
+    response_provider = model_manager.get("response")
 
     ctx = get_context_manager(
         session_id=body.session_id,
@@ -604,36 +638,108 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
         config=config,
     )
 
-    messages = ctx.build_messages(body.message)
+    messages         = ctx.build_messages(body.message)
     is_first_message = get_message_count(body.session_id) == 0
 
     if body.is_regenerate:
-        # 재생성: 마지막 assistant 메시지 삭제, user 메시지 저장 스킵
         delete_last_assistant_message(body.session_id)
     else:
-        # 일반: user 메시지 스트리밍 시작 전 즉시 저장
         add_message(body.session_id, "user", body.message)
 
     async def event_stream():
+        from core.agents import (
+            run_orchestrator_loop, analyze_images,
+            TOOLS, is_image,
+        )
         full_response = []
         summarizing   = False
         _saved        = False
 
         try:
-            # 요약 필요 여부 선제 확인
+            # ── Stage 1: 오케스트레이터 루프 ──────────────────
+            orchestrator   = await model_manager.get_orchestrator()
+            vision_provider = model_manager.get("vision")
+            tool_results   = []
+            stage1_messages = list(messages)
+
+            if orchestrator is not None:
+                yield "data: " + json.dumps({"type": "agent", "agent": "orchestrating"}) + "\n\n"
+                tool_results, stage1_messages = await run_orchestrator_loop(
+                    orchestrator,
+                    stage1_messages,
+                    body.images,
+                    body.upload_paths,
+                    vision_provider,
+                    body.message,
+                    config,
+                )
+                # 실행된 도구 종류별 agent 이벤트 발행
+                seen = set()
+                for tr in tool_results:
+                    tool_name = tr.get("tool", "")
+                    if tool_name not in seen:
+                        seen.add(tool_name)
+                        agent_label = {
+                            "rag_search":    "rag",
+                            "analyze_image": "vision",
+                            "store_file":    "store",
+                        }.get(tool_name, tool_name)
+                        yield "data: " + json.dumps({"type": "agent", "agent": agent_label}) + "\n\n"
+
+            else:
+                # Fallback: 오케스트레이터 없을 때 이미지 첨부가 있으면 직접 VLM 분석
+                if body.images and vision_provider:
+                    yield "data: " + json.dumps({"type": "agent", "agent": "vision"}) + "\n\n"
+                    img_ctx = await analyze_images(vision_provider, body.images, body.message)
+                    if img_ctx:
+                        tool_results.append({"tool": "analyze_image", "result": img_ctx, "status": "ok"})
+
+            # ── Stage 2: 응답 생성 ────────────────────────────
+            # 도구 결과를 일반 텍스트 컨텍스트로 변환 후 user 메시지에 주입
+            if tool_results:
+                context_text = "\n\n".join(
+                    f"[{tr['tool']} 결과]\n{tr['result']}"
+                    for tr in tool_results
+                    if tr.get("status") == "ok"
+                )
+                # 컨텍스트 초과 방지: 결과 텍스트를 3000자로 제한
+                if len(context_text) > 3000:
+                    context_text = context_text[:3000] + "\n...(이하 생략)"
+                if context_text:
+                    final_messages = ctx.build_messages(
+                        f"{body.message}\n\n{context_text}"
+                    )
+                else:
+                    final_messages = ctx.build_messages(body.message)
+            else:
+                final_messages = ctx.build_messages(body.message)
+
+            logger.info(
+                "Stage 2 진입 [session=%d] | 메시지 수=%d | 도구결과=%d개",
+                body.session_id, len(final_messages), len(tool_results)
+            )
+
+            # RAG 출처 이벤트 발행
+            all_sources = []
+            for tr in tool_results:
+                if tr.get("tool") == "rag_search" and tr.get("sources"):
+                    all_sources.extend(tr["sources"])
+            if all_sources:
+                yield "data: " + json.dumps({"type": "sources", "sources": all_sources}) + "\n\n"
+
+            # 컨텍스트 요약 필요 시
             if ctx.needs_summary():
                 summarizing = True
                 yield "data: " + json.dumps({"type": "summarizing"}) + "\n\n"
-                await ctx.summarize(provider)
-                messages_updated = ctx.build_messages(body.message)
-            else:
-                messages_updated = messages
+                await ctx.summarize(response_provider)
+                if not tool_results:
+                    final_messages = ctx.build_messages(body.message)
 
-            # 스트리밍 응답
             yield "data: " + json.dumps({"type": "start"}) + "\n\n"
 
-            async for chunk in provider.chat(
-                messages_updated, stream=True,
+            async for chunk in response_provider.chat(
+                final_messages,
+                stream=True,
                 think=think_enabled,
                 inference_config=inference_config,
             ):
@@ -645,7 +751,6 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
             add_message(body.session_id, "assistant", clean_response, thinking=thinking_text)
             _saved = True
 
-            # 컨텍스트 히스토리 갱신 (think 제거본으로)
             ctx.add_exchange(body.message, clean_response)
 
             yield "data: " + json.dumps({
@@ -654,7 +759,6 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                 "summarized": summarizing,
             }) + "\n\n"
 
-            # 첫 메시지이면 백그라운드 제목 자동 생성 (2-7)
             if is_first_message:
                 background.add_task(
                     _generate_title, body.session_id, body.message, response_text, config
@@ -678,14 +782,12 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                     logger.info("중단/실패 메시지 저장 [session=%d]: %s", body.session_id, placeholder)
                 except Exception as save_err:
                     logger.warning("중단/실패 저장 오류 [session=%d]: %s", body.session_id, save_err)
-                # 첫 메시지 중단 시 fallback 제목 저장
                 if is_first_message:
                     try:
                         fallback_title = body.message.strip()[:20]
                         update_session(body.session_id, title=fallback_title)
-                        logger.info("첫 메시지 중단 fallback 제목 저장 [session=%d]: %s", body.session_id, fallback_title)
-                    except Exception as title_err:
-                        logger.warning("fallback 제목 저장 오류 [session=%d]: %s", body.session_id, title_err)
+                    except Exception:
+                        pass
 
     return StreamingResponse(
         event_stream(),
@@ -706,6 +808,9 @@ async def _generate_title(session_id: int, user_msg: str, assistant_msg: str, co
     fallback_title = user_msg.strip()[:20]
     try:
         provider = model_manager.get("response")
+        if provider is None:
+            update_session(session_id, title=fallback_title)
+            return
         prompt = (
             "다음 대화의 제목을 20자 이내로 만들어줘. "
             "제목만 출력하고 따옴표나 부연설명은 넣지 마.\n\n"

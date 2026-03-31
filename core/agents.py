@@ -1,0 +1,355 @@
+"""
+core/agents.py — Re-Act 기반 에이전틱 워크플로우 (Phase 7-E)
+- TOOLS 정의
+- run_orchestrator_loop(): 오케스트레이터(0.8b) 루프
+- execute_tool(): 도구 실행
+- analyze_images(): VLM 직접 분석 (fallback용)
+- is_image(): 이미지 파일 여부
+"""
+import json
+import logging
+import asyncio
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+TOOL_CALL_PREFIX = "\x00TOOL_CALLS\x00"
+MAX_TOOL_CALLS   = 3  # 무한루프 방지
+
+
+def is_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in IMAGE_EXTENSIONS
+
+
+# ──────────────────────────────────────
+# 도구 정의
+# ──────────────────────────────────────
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": (
+                "사용자 질문과 관련된 내용을 로컬에 등록된 문서에서 검색합니다. "
+                "저장된 파일, 문서, 데이터에 대한 질문일 때 사용하세요."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색할 키워드 또는 질문"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_image",
+            "description": (
+                "첨부된 이미지를 VLM으로 분석합니다. "
+                "이미지 내용 확인, OCR, 설명을 요청할 때 사용하세요."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "분석할 이미지 파일명"
+                    }
+                },
+                "required": ["filename"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "store_file",
+            "description": (
+                "첨부된 파일을 로컬 Storage에 임베딩 등록합니다. "
+                "파일을 저장하거나 나중에 검색 가능하게 등록해달라고 할 때 사용하세요."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "저장할 파일명"
+                    }
+                },
+                "required": ["filename"]
+            }
+        }
+    },
+]
+
+
+# ──────────────────────────────────────
+# 도구 실행
+# ──────────────────────────────────────
+
+async def execute_tool(
+    name: str,
+    args: dict,
+    images_b64: list[dict],
+    upload_paths: list[dict],
+    vision_provider,
+    user_message: str,
+    config: dict,
+) -> dict:
+    """
+    도구 이름과 인자를 받아 실행하고 결과 dict 반환.
+    반환: { "tool": str, "result": str, "status": "ok" | "error" }
+    """
+    try:
+        if name == "rag_search":
+            from core.database import hybrid_search
+            from core.file_engine import embed_chunks, rerank
+            query  = args.get("query", user_message)
+            top_k  = config.get("rag", {}).get("top_k", 5)
+            query_vec = None
+            try:
+                vecs = embed_chunks([query])
+                if vecs:
+                    query_vec = vecs[0]
+            except Exception as e:
+                logger.warning("쿼리 임베딩 실패 — FTS만 사용: %s", e)
+
+            # top_k * 3개를 가져와서 리랭킹 후 top_k로 압축
+            candidates = hybrid_search(query, query_vec, top_k=top_k * 3)
+            if not candidates:
+                return {"tool": name, "result": "관련 문서를 찾지 못했습니다.", "status": "ok", "sources": []}
+
+            # 리랭킹 적용
+            try:
+                docs = [r.get("content", "") for r in candidates]
+                scores = rerank(query, docs)
+                # 점수와 함께 정렬 후 상위 top_k 선택 (임계값 0.3 이상만)
+                ranked = sorted(
+                    zip(scores, candidates),
+                    key=lambda x: x[0],
+                    reverse=True
+                )
+                results = [r for s, r in ranked[:top_k] if s >= 0.3]
+                if not results:
+                    # 임계값 통과 없으면 상위 top_k 그대로 사용
+                    results = [r for _, r in ranked[:top_k]]
+                logger.info("리랭킹 완료: %d→%d개 (임계값 0.3)", len(candidates), len(results))
+            except Exception as e:
+                logger.warning("리랭킹 실패 — 원본 결과 사용: %s", e)
+                results = candidates[:top_k]
+
+            formatted = "\n\n".join(
+                f"[{r.get('source_name', r.get('display_name', '문서'))}]\n{r.get('content', '')}"
+                for r in results
+            )
+            # 출처 메타데이터 수집 (중복 제거)
+            seen = set()
+            sources = []
+            for r in results:
+                name_key = r.get("source_name") or r.get("display_name") or ""
+                path_key = r.get("source_path") or r.get("original_path") or ""
+                if name_key not in seen:
+                    seen.add(name_key)
+                    sources.append({"name": name_key, "path": path_key})
+            return {"tool": name, "result": formatted, "status": "ok", "sources": sources}
+
+        elif name == "analyze_image":
+            filename = args.get("filename", "")
+            if vision_provider is None:
+                return {"tool": name, "result": "시각 모델이 설정되지 않았습니다.", "status": "error"}
+            # filename에 해당하는 base64 데이터 찾기
+            img = next((i for i in images_b64 if i.get("name") == filename), None)
+            if img is None and images_b64:
+                img = images_b64[0]  # fallback: 첫 번째 이미지
+            if img is None:
+                return {"tool": name, "result": "분석할 이미지를 찾지 못했습니다.", "status": "error"}
+            prompt = (
+                f"사용자 요청: {user_message}\n\n"
+                "이 이미지를 분석하고 내용을 설명해주세요. "
+                "텍스트가 있다면 모두 추출해주세요."
+            )
+            result = await vision_provider.vision(img["data"], prompt)
+            return {"tool": name, "result": result.strip(), "status": "ok"}
+
+        elif name == "store_file":
+            filename = args.get("filename", "")
+            up = next((u for u in upload_paths if u.get("name") == filename), None)
+            if up is None and upload_paths:
+                up = upload_paths[0]
+            if up is None:
+                return {"tool": name, "result": "저장할 파일을 찾지 못했습니다.", "status": "error"}
+            from core.file_engine import register_file
+            reg_result = await register_file(up["tmp_path"], up["name"], config)
+            # uploads_tmp 정리 (V5)
+            try:
+                Path(up["tmp_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+            return {
+                "tool": name,
+                "result": f"'{up['name']}' 파일이 Storage에 등록됐습니다. (file_id={reg_result['file_id']})",
+                "status": "ok"
+            }
+
+        else:
+            return {"tool": name, "result": f"알 수 없는 도구: {name}", "status": "error"}
+
+    except Exception as e:
+        logger.warning("도구 실행 실패 [%s]: %s", name, e)
+        return {"tool": name, "result": f"도구 실행 오류: {e}", "status": "error"}
+
+
+# ──────────────────────────────────────
+# 오케스트레이터 루프
+# ──────────────────────────────────────
+
+async def run_orchestrator_loop(
+    orchestrator,
+    messages: list[dict],
+    images_b64: list[dict],
+    upload_paths: list[dict],
+    vision_provider,
+    user_message: str,
+    config: dict,
+) -> tuple[list[dict], list[dict]]:
+    """
+    오케스트레이터(0.8b)를 통해 도구 선택 → 실행 루프.
+    반환: (tool_results, updated_messages)
+    """
+    ORCHESTRATOR_SYSTEM = (
+        "You are a routing assistant. Your only job is to decide which tools to call.\n"
+        "Do NOT answer the user's question yourself.\n\n"
+        "Tool usage rules:\n"
+        "- rag_search: Call this when the user asks about any stored documents, files, or registered data. "
+        "Always use this if the user mentions '등록된', '저장된', '문서', '파일', or asks to search/find something.\n"
+        "- analyze_image: Call this when an image is attached AND the user wants to understand, describe, or extract text from it.\n"
+        "- store_file: Call this when a file is attached AND the user wants to save, register, or store it for later search.\n"
+        "- If none of the above apply, do not call any tool.\n\n"
+        "Call tools immediately without explanation. Do not think or reason before deciding."
+    )
+
+    tool_results = []
+
+    # 오케스트레이터 전용 메시지: system + 최신 user 메시지만
+    loop_messages = [{"role": "system", "content": ORCHESTRATOR_SYSTEM}]
+
+    # 최신 user 메시지 추출
+    last_user = user_message
+    context_hint = ""
+    if images_b64:
+        names = ", ".join(i["name"] for i in images_b64)
+        context_hint += f"\n[Attached images: {names}]"
+    if upload_paths:
+        names = ", ".join(u["name"] for u in upload_paths)
+        context_hint += f"\n[Attached files: {names}]"
+
+    loop_messages.append({
+        "role": "user",
+        "content": last_user + context_hint
+    })
+
+    for _ in range(MAX_TOOL_CALLS):
+        # 오케스트레이터 호출 (non-streaming, tool_calls 파싱)
+        raw_chunks = []
+        tool_calls_raw = None
+        async for chunk in orchestrator.chat(
+            loop_messages,
+            stream=True,
+            think=False,
+            inference_config={"temperature": 0.1, "num_predict": 256},
+            tools=TOOLS,
+        ):
+            if chunk.startswith(TOOL_CALL_PREFIX):
+                tool_calls_raw = chunk[len(TOOL_CALL_PREFIX):]
+            else:
+                raw_chunks.append(chunk)
+
+        # tool_calls 없으면 루프 종료 → Stage 2로
+        if not tool_calls_raw:
+            logger.info("오케스트레이터: 도구 호출 없음 → Stage 2 진행")
+            break
+
+        # tool_calls 파싱
+        try:
+            tool_calls = json.loads(tool_calls_raw)
+        except Exception as e:
+            logger.warning("tool_calls 파싱 실패: %s | raw: %s", e, tool_calls_raw)
+            break
+
+        # 빈 리스트도 종료 처리
+        if not tool_calls:
+            logger.info("오케스트레이터: 빈 tool_calls → Stage 2 진행")
+            break
+
+        # 오케스트레이터 응답을 메시지 히스토리에 추가
+        loop_messages.append({
+            "role": "assistant",
+            "content": "".join(raw_chunks),
+            "tool_calls": tool_calls,
+        })
+
+        # 각 tool_call 실행
+        for tc in tool_calls:
+            fn   = tc.get("function", {})
+            name = fn.get("name", "")
+            try:
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+            except Exception:
+                args = {}
+
+            logger.info("도구 실행: %s %s", name, args)
+            result = await execute_tool(
+                name, args, images_b64, upload_paths,
+                vision_provider, user_message, config
+            )
+            tool_results.append(result)
+
+            # tool_result를 메시지에 추가
+            loop_messages.append({
+                "role": "tool",
+                "content": result["result"],
+            })
+
+    return tool_results, loop_messages
+
+
+# ──────────────────────────────────────
+# Fallback: VLM 직접 분석 (오케스트레이터 없을 때)
+# ──────────────────────────────────────
+
+async def analyze_images(
+    vision_provider,
+    images_b64: list[dict],
+    user_message: str,
+) -> str:
+    """오케스트레이터 없을 때 이미지를 직접 VLM 분석."""
+    if not images_b64 or vision_provider is None:
+        return ""
+    prompt = (
+        f"사용자 요청: {user_message}\n\n"
+        "이 이미지를 분석하고 내용을 설명해주세요. "
+        "텍스트가 있다면 모두 추출해주세요."
+    )
+    results = []
+    for img in images_b64:
+        name = img.get("name", "image")
+        data = img.get("data", "")
+        if not data:
+            continue
+        try:
+            result = await vision_provider.vision(data, prompt)
+            results.append(f"[{name}]\n{result.strip()}")
+        except Exception as e:
+            logger.warning("VLM 분석 실패 [%s]: %s", name, e)
+    if not results:
+        return ""
+    return "[이미지 분석 결과]\n" + "\n\n".join(results)

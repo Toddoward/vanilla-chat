@@ -108,8 +108,8 @@ def get_bge_model():
             from FlagEmbedding import BGEM3FlagModel
             _bge_model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
             logger.info("BGE-M3 모델 로드 완료")
-        except ImportError:
-            logger.error("FlagEmbedding 미설치")
+        except Exception as e:
+            logger.error("FlagEmbedding 로드 실패: %s", e)
             raise
     return _bge_model
 
@@ -141,8 +141,8 @@ def get_reranker():
             from FlagEmbedding import FlagReranker
             _reranker_model = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
             logger.info("BGE-Reranker-v2-M3 로드 완료")
-        except ImportError:
-            logger.warning("FlagEmbedding 미설치 — 리랭킹 비활성화")
+        except Exception as e:
+            logger.warning("FlagEmbedding 리랭커 로드 실패: %s", e)
     return _reranker_model
 
 
@@ -236,6 +236,66 @@ async def register_file(
         update_file_link_status(file_id, embedding_status="error")
         logger.error("파일 등록 실패 [file_id=%d]: %s", file_id, e)
         raise
+
+
+async def reembed_all_files(config: dict, progress_callback=None) -> dict:
+    """
+    모든 등록 파일을 재임베딩.
+    임베딩 모델 교체 후 차원 불일치 해소 목적.
+    1. vec_chunks 테이블 삭제
+    2. 모든 파일 순차 재임베딩
+    """
+    from core.database import (
+        get_all_file_links, update_file_link_status,
+        add_chunks, add_vectors, delete_file_chunks, drop_vec_table,
+    )
+
+    drop_vec_table()  # 기존 차원 테이블 삭제
+
+    files = get_all_file_links()
+    if not files:
+        return {"reembedded": 0, "errors": 0}
+
+    rag_cfg    = config.get("rag", {})
+    chunk_size = rag_cfg.get("chunk_size", 512)
+    overlap    = rag_cfg.get("chunk_overlap", 64)
+
+    done_count  = 0
+    error_count = 0
+    total       = len(files)
+
+    for idx, f in enumerate(files):
+        file_id   = f["id"]
+        file_path = f["original_path"]
+        file_type = f.get("file_type") or detect_file_type(file_path)
+
+        try:
+            update_file_link_status(file_id, embedding_status="running")
+            delete_file_chunks(file_id)
+
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(None, extract_text, file_path, file_type)
+            chunks = chunk_text(text, chunk_size, overlap)
+
+            if chunks:
+                vectors   = await loop.run_in_executor(None, embed_chunks, chunks)
+                chunk_ids = add_chunks(file_id, chunks)
+                add_vectors(chunk_ids, vectors)
+
+            update_file_link_status(file_id, embedding_status="done")
+            done_count += 1
+            logger.info("재임베딩 완료 [%d/%d] file_id=%d", idx + 1, total, file_id)
+
+        except Exception as e:
+            update_file_link_status(file_id, embedding_status="error")
+            error_count += 1
+            logger.error("재임베딩 실패 [file_id=%d]: %s", file_id, e)
+
+        if progress_callback:
+            pct = int((idx + 1) / total * 100)
+            await progress_callback(pct)
+
+    return {"reembedded": done_count, "errors": error_count}
 
 
 # ──────────────────────────────────────────

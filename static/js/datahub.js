@@ -28,10 +28,40 @@ onReady(function() {
 
 document.addEventListener('page:enter', function(e) {
   if (e.detail.page !== 'datahub') return;
-  // 레이아웃은 이미 렌더링됨. 데이터만 로드
   if (dhCurrentTab === 'files') loadFiles();
   if (dhCurrentTab === 'apis')  loadApis();
+  checkEmbeddingDimMismatch();
 });
+
+// ──────────────────────────────────────
+// 임베딩 차원 불일치 감지 + 재임베딩 배너
+// ──────────────────────────────────────
+async function checkEmbeddingDimMismatch() {
+  var panel = document.getElementById('dh-panel-files');
+  if (!panel) return;
+  var existing = document.getElementById('dh-dim-warning');
+  if (existing) existing.remove();
+  try {
+    var status = await api('GET', '/api/status');
+    if (!status.dim_mismatch) return;
+    var banner = document.createElement('div');
+    banner.id = 'dh-dim-warning';
+    banner.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--warning-dim,#3a2e00);border:1px solid var(--warning,#f5c400);border-radius:var(--radius-md);margin-bottom:12px;font-size:var(--font-size-sm);color:var(--warning,#f5c400);';
+    banner.innerHTML =
+      '<i class="bi bi-exclamation-triangle-fill"></i>' +
+      '<span style="flex:1;">임베딩 모델이 변경되어 기존 벡터와 차원이 다릅니다. 재임베딩이 필요합니다.</span>' +
+      '<button id="dh-reembed-btn" style="padding:4px 10px;border-radius:var(--radius-sm);background:var(--warning,#f5c400);color:#000;border:none;cursor:pointer;font-size:var(--font-size-xs);font-weight:600;">재임베딩 시작</button>';
+    panel.insertBefore(banner, panel.firstChild);
+    document.getElementById('dh-reembed-btn')?.addEventListener('click', async function() {
+      if (!confirm('모든 파일을 재임베딩합니다. 시간이 걸릴 수 있습니다.')) return;
+      try {
+        await api('POST', '/api/files/reembed', {});
+        showToast('재임베딩이 시작됐습니다. 완료 시 뱃지가 갱신됩니다.');
+        banner.remove();
+      } catch(e) { showToast('재임베딩 시작 실패', 'error'); }
+    });
+  } catch(e) { /* 상태 조회 실패 시 무시 */ }
+}
 
 // ──────────────────────────────────────
 // 전체 레이아웃

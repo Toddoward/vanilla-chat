@@ -6,6 +6,7 @@ python-multipart          # 파일 업로드
 # ── LLM / Embedding ─────────────────────
 ollama                    # Ollama Python 클라이언트
 FlagEmbedding             # BGE-M3, BGE-Reranker-v2-M3
+transformers<4.46.0
 
 # ── Vector DB ───────────────────────────
 sqlite-vec                # SQLite 벡터 확장

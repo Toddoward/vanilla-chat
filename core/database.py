@@ -18,8 +18,13 @@ def get_connection() -> sqlite3.Connection:
     """DB 커넥션 반환. Row를 dict처럼 접근 가능하게 설정."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # 동시 읽기 성능 향상
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Windows에서 sqlite-vec 확장 로드를 위해 필요
+    try:
+        conn.enable_load_extension(True)
+    except AttributeError:
+        pass  # 일부 빌드에서 미지원 시 무시
     return conn
 
 
@@ -433,18 +438,81 @@ def add_chunks(file_id: int, chunks: list[str]) -> list[int]:
         conn.close()
 
 
+def get_embedding_dim() -> int | None:
+    """현재 vec_chunks 테이블의 임베딩 차원 반환. 테이블 없으면 None."""
+    conn = get_connection()
+    try:
+        import sqlite_vec
+        sqlite_vec.load(conn)
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+        ).fetchone()
+        if not row:
+            return None
+        import re
+        m = re.search(r'float\[(\d+)\]', row["sql"] or "")
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def delete_file_chunks(file_id: int) -> None:
+    """특정 파일의 청크 및 벡터 삭제 (재임베딩 전처리용)."""
+    conn = get_connection()
+    try:
+        # chunk_ids 먼저 수집
+        rows = conn.execute(
+            "SELECT id FROM chunks WHERE file_id=?", (file_id,)
+        ).fetchall()
+        chunk_ids = [r["id"] for r in rows]
+        if chunk_ids:
+            try:
+                import sqlite_vec
+                sqlite_vec.load(conn)
+                placeholders = ",".join("?" * len(chunk_ids))
+                conn.execute(
+                    f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})", chunk_ids
+                )
+            except Exception:
+                pass  # vec_chunks 없으면 무시
+        conn.execute("DELETE FROM fts_chunks WHERE file_id=?", (file_id,))
+        conn.execute("DELETE FROM chunks WHERE file_id=?", (file_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def drop_vec_table() -> None:
+    """vec_chunks 가상 테이블 삭제 — 임베딩 모델 교체 후 전체 재임베딩 시 사용."""
+    conn = get_connection()
+    try:
+        conn.execute("DROP TABLE IF EXISTS vec_chunks")
+        conn.commit()
+        logger.info("vec_chunks 테이블 삭제 완료 (재임베딩 필요)")
+    finally:
+        conn.close()
+
+
 def add_vectors(chunk_ids: list[int], vectors: list[list[float]]) -> None:
     """sqlite-vec에 벡터 저장. chunk_id를 rowid로 사용."""
     conn = get_connection()
     try:
         import sqlite_vec, struct
         sqlite_vec.load(conn)
-        # vec_chunks 가상 테이블이 없으면 생성 (첫 실행 시)
         if vectors:
-            dim = len(vectors[0])
+            new_dim = len(vectors[0])
+            # 차원 불일치 감지
+            existing_dim = get_embedding_dim()
+            if existing_dim is not None and existing_dim != new_dim:
+                raise ValueError(
+                    f"임베딩 차원 불일치: 기존 {existing_dim}차원 vs 새 모델 {new_dim}차원. "
+                    "Settings에서 임베딩 모델을 변경했다면 Data Hub에서 재임베딩이 필요합니다."
+                )
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
-                USING vec0(embedding float[{dim}])
+                USING vec0(embedding float[{new_dim}])
             """)
             for chunk_id, vec in zip(chunk_ids, vectors):
                 blob = struct.pack(f"{len(vec)}f", *vec)
@@ -453,6 +521,8 @@ def add_vectors(chunk_ids: list[int], vectors: list[list[float]]) -> None:
                     (chunk_id, blob)
                 )
         conn.commit()
+    except ValueError:
+        raise  # 차원 불일치는 상위로 전파
     except Exception as e:
         logger.warning("벡터 저장 실패 (sqlite-vec 미설치?): %s", e)
     finally:

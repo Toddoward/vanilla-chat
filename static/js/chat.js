@@ -181,9 +181,12 @@ function clearAttachments() {
 // 에이전트 상태 인라인 표시 (3-8)
 // ──────────────────────────────────────
 var AGENT_STATUS = {
-  rag:    '<i class="bi bi-search"></i> 저장된 문서 검색 중...',
-  vision: '<i class="bi bi-eye"></i> 이미지 분석 중...',
-  api:    '<i class="bi bi-globe"></i> 데이터 수집 중...',
+  orchestrating: '<i class="bi bi-gear-fill"></i> 의도 파악 중...',
+  rag:           '<i class="bi bi-search"></i> 저장된 문서 검색 중...',
+  vision:        '<i class="bi bi-eye"></i> 이미지 분석 중...',
+  store:         '<i class="bi bi-hdd"></i> 파일 저장 중...',
+  api:           '<i class="bi bi-globe"></i> 데이터 수집 중...',
+  responding:    '<i class="bi bi-cpu"></i> 응답 생성 중...',
 };
 
 function showAgentStatus(type) {
@@ -504,7 +507,7 @@ function makeActions(content, isAssistant) {
   return div;
 }
 
-function appendMessage(role, content, animate, isPlaceholder) {
+function appendMessage(role, content, animate, isPlaceholder, imageNames) {
   if (animate === undefined) animate = true;
   var el = document.getElementById('chat-messages');
   document.getElementById('greeting-screen') && document.getElementById('greeting-screen').remove();
@@ -526,6 +529,20 @@ function appendMessage(role, content, animate, isPlaceholder) {
   } else {
     bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : '<p>' + escapeHtml(content) + '</p>';
   }
+
+  // 사용자 버블 — 첨부 이미지 칩 표시
+  if (role === 'user' && imageNames && imageNames.length > 0) {
+    var chips = document.createElement('div');
+    chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
+    imageNames.forEach(function(name) {
+      var chip = document.createElement('span');
+      chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);border:1px solid var(--border);font-size:var(--font-size-xs);color:var(--text-secondary);';
+      chip.innerHTML = '<i class="bi bi-image"></i> ' + escapeHtml(name);
+      chips.appendChild(chip);
+    });
+    bubble.appendChild(chips);
+  }
+
   wrap.appendChild(bubble);
   wrap.appendChild(makeActions(content, role === 'assistant'));
   el.appendChild(wrap);
@@ -607,7 +624,32 @@ async function sendMessage(isRegenerate) {
   input.value = '';
   input.style.height = 'auto';
   removeLatestLogo();
-  appendMessage('user', text);
+
+  // 첨부 이미지를 base64로 변환 (appendMessage 전에 파일명 수집)
+  var imagesPayload = [];
+  var imageFileNames = [];
+  if (attachedFiles.length > 0 && !isRegenerate) {
+    var imageFiles = attachedFiles.filter(function(f) {
+      var ext = f.name.split('.').pop().toLowerCase();
+      return ['png','jpg','jpeg','webp','gif','bmp'].includes(ext);
+    });
+    imageFileNames = imageFiles.map(function(f) { return f.name; });
+    if (imageFiles.length > 0) {
+      imagesPayload = await Promise.all(imageFiles.map(function(f) {
+        return new Promise(function(resolve) {
+          var reader = new FileReader();
+          reader.onload = function(e) {
+            var b64 = e.target.result.split(',')[1] || '';
+            resolve({ name: f.name, data: b64 });
+          };
+          reader.readAsDataURL(f);
+        });
+      }));
+    }
+  }
+  clearAttachments();
+
+  appendMessage('user', text, true, false, imageFileNames);
   setStreamingMode(true);
   streamStateMap[sessionId] = { thinking:'', response:'', thinkDone:false, done:false };
   var st = streamStateMap[sessionId];
@@ -618,7 +660,12 @@ async function sendMessage(isRegenerate) {
   try {
     var resp = await fetch('/api/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ session_id: sessionId, message: text, is_regenerate: !!isRegenerate }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        message: text,
+        is_regenerate: !!isRegenerate,
+        images: imagesPayload,
+      }),
       signal: abortController.signal,
     });
     var reader = resp.body.getReader();
@@ -638,6 +685,11 @@ async function sendMessage(isRegenerate) {
           rawBuffer += data.content;
           var isActive = String(currentSessionId) === String(sessionId);
           processBuffer(isActive);
+        } else if (data.type === 'agent') {
+          showAgentStatus(data.agent);
+        } else if (data.type === 'sources') {
+          // RAG 출처 — done 이후 streamWrap에 붙여야 하므로 임시 저장
+          st._sources = data.sources;
         } else if (data.type === 'done') {
           if (rawBuffer) {
             var ia = String(currentSessionId) === String(sessionId);
@@ -661,7 +713,13 @@ async function sendMessage(isRegenerate) {
               streamWrap.appendChild(makeActions('', true));
             }
           } else {
-            if (streamBubble) streamBubble.innerHTML = renderMarkdown(st.response);
+            if (streamBubble) {
+              streamBubble.innerHTML = renderMarkdown(st.response);
+              // RAG 출처를 버블 내부 하단에 표시
+              if (st._sources && st._sources.length) {
+                appendSources(streamBubble, st._sources);
+              }
+            }
             if (streamWrap) {
               streamWrap.removeAttribute('id');
               streamWrap.appendChild(makeActions(st.response, true));

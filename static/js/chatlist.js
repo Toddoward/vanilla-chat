@@ -3,13 +3,6 @@ import { loadSidebarChatList } from './sidebar.js';
 import { onReady, showToast, updateBulkActions, getFileIcon, escapeHtml, formatDate, getDateGroupLabel } from './utils.js';
 import { icon, favIcon } from './icons.js';
 
-
-
-/**
- * static/js/chatlist.js
- * 채팅 목록 페이지 — 날짜 그룹, 즐겨찾기, 다중 삭제
- */
-
 var clSelected = new Set();
 
 // ──────────────────────────────────────
@@ -36,7 +29,7 @@ function renderChatListPage() {
       '<h2 class="cl-title"><i class="bi bi-chat-square-dots"></i> 채팅 목록</h2>' +
       '<div id="cl-bulk-actions" style="display:none;">' +
         '<button id="cl-select-all-btn" class="cl-action-btn"><i class="bi bi-check-all"></i> 전체 선택</button>' +
-        '<button id="cl-deselect-btn" class="cl-action-btn"><i class="bi bi-x-lg"></i> 전체 해제</button>' +
+        '<button id="cl-deselect-btn" class="cl-action-btn" style="display:none;"><i class="bi bi-x-lg"></i> 전체 해제</button>' +
         '<span id="cl-selected-count">0개 선택됨</span>' +
         '<button id="cl-delete-btn" class="cl-danger-btn"><i class="bi bi-trash"></i> 선택 삭제</button>' +
       '</div>' +
@@ -51,19 +44,21 @@ function renderChatListPage() {
       document.querySelectorAll('.cl-row').forEach(function(row) {
         var id = String(row.dataset.sessionId);
         clSelected.add(id);
-        var icon = row.querySelector('.cl-check-icon');
-        if (icon) icon.classList.add('checked');
+        var chk = row.querySelector('.cl-check-icon');
+        if (chk) chk.classList.add('checked');
       });
       updateBulkActions('cl-bulk-actions', 'cl-selected-count', clSelected);
+      updateSelectButtons();
     });
 
   document.getElementById('cl-deselect-btn')
     ?.addEventListener('click', function() {
       clSelected.clear();
-      document.querySelectorAll('.cl-check-icon').forEach(function(icon) {
-        icon.classList.remove('checked');
+      document.querySelectorAll('.cl-check-icon').forEach(function(chk) {
+        chk.classList.remove('checked');
       });
       updateBulkActions('cl-bulk-actions', 'cl-selected-count', clSelected);
+      updateSelectButtons();
     });
 }
 
@@ -86,36 +81,45 @@ async function loadChatList() {
 function renderChatList(sessions) {
   var body = document.getElementById('cl-body');
   if (!body) return;
-
   if (!sessions.length) {
     body.innerHTML = '<div class="cl-empty">아직 채팅 기록이 없습니다.</div>';
     return;
   }
-
-  // 즐겨찾기 / 날짜 그룹 분리
   var favorites = sessions.filter(function(s) { return s.is_favorite; });
   var normals   = sessions.filter(function(s) { return !s.is_favorite; });
-
   body.innerHTML = '';
-
   if (favorites.length) {
     body.appendChild(makeGroupLabel('즐겨찾기', 'bi bi-star-fill fav-active'));
     favorites.forEach(function(s) { body.appendChild(makeChatRow(s)); });
   }
-
   var groups = {};
   normals.forEach(function(s) {
     var label = getDateGroupLabel(s.updated_at || s.created_at);
     if (!groups[label]) groups[label] = [];
     groups[label].push(s);
   });
-
   Object.keys(groups).forEach(function(label) {
     body.appendChild(makeGroupLabel(label));
     groups[label].forEach(function(s) { body.appendChild(makeChatRow(s)); });
   });
 }
 
+// ──────────────────────────────────────
+// 전체 선택/해제 버튼 상태 갱신
+// ──────────────────────────────────────
+function updateSelectButtons() {
+  var total   = document.querySelectorAll('.cl-row').length;
+  var allBtn  = document.getElementById('cl-select-all-btn');
+  var desBtn  = document.getElementById('cl-deselect-btn');
+  if (!allBtn || !desBtn) return;
+  var allSelected = total > 0 && clSelected.size >= total;
+  allBtn.style.display = allSelected ? 'none'        : 'inline-flex';
+  desBtn.style.display = allSelected ? 'inline-flex' : 'none';
+}
+
+// ──────────────────────────────────────
+// 그룹 레이블
+// ──────────────────────────────────────
 function makeGroupLabel(text, iconClass) {
   var el = document.createElement('div');
   el.className = 'cl-group-label';
@@ -129,12 +133,15 @@ function makeGroupLabel(text, iconClass) {
   return el;
 }
 
+// ──────────────────────────────────────
+// 채팅 행
+// ──────────────────────────────────────
 function makeChatRow(session) {
   var row = document.createElement('div');
   row.className = 'cl-row';
   row.dataset.sessionId = session.id;
 
-  // 체크 버튼 — 투명 버튼이 클릭 영역, 내부 span이 시각적 체크박스
+  // 체크 버튼
   var checkBtn = document.createElement('button');
   checkBtn.className = 'cl-check-btn';
   checkBtn.title = '선택';
@@ -152,8 +159,10 @@ function makeChatRow(session) {
       checkIcon.classList.add('checked');
     }
     updateBulkActions('cl-bulk-actions', 'cl-selected-count', clSelected);
+    updateSelectButtons();
   });
 
+  // 즐겨찾기 버튼
   var favBtn = document.createElement('button');
   favBtn.className = 'cl-fav-btn';
   favBtn.title = session.is_favorite ? '즐겨찾기 해제' : '즐겨찾기 등록';
@@ -172,6 +181,7 @@ function makeChatRow(session) {
     } catch(e2) { showToast('즐겨찾기 변경 실패', 'error'); }
   });
 
+  // 정보 영역
   var info = document.createElement('div');
   info.className = 'cl-info';
   var title = document.createElement('span');
@@ -183,20 +193,7 @@ function makeChatRow(session) {
     (session.message_count ? ' · ' + session.message_count + '개 메시지' : '');
   info.append(title, meta);
 
-  var delBtn = document.createElement('button');
-  delBtn.className = 'cl-del-btn';
-  delBtn.innerHTML = '<i class="bi bi-trash"></i>';
-  delBtn.title = '삭제';
-  delBtn.addEventListener('click', async function(e) {
-    e.stopPropagation();
-    if (!confirm('"' + (session.title || '새 대화') + '"을 삭제할까요?')) return;
-    await api('DELETE', '/api/sessions', { ids: [session.id] });
-    showToast('삭제됨');
-    loadChatList();
-    loadSidebarChatList();
-    document.dispatchEvent(new CustomEvent('chat:deleted'));
-  });
-
+  // 수정 버튼
   var editBtn = document.createElement('button');
   editBtn.className = 'cl-edit-btn';
   editBtn.innerHTML = '<i class="bi bi-pencil"></i>';
@@ -213,7 +210,6 @@ function makeChatRow(session) {
     title.appendChild(input);
     input.focus();
     input.select();
-
     async function saveTitle() {
       var newTitle = input.value.trim();
       if (!newTitle) newTitle = current;
@@ -238,9 +234,23 @@ function makeChatRow(session) {
     });
   });
 
+  // 삭제 버튼
+  var delBtn = document.createElement('button');
+  delBtn.className = 'cl-del-btn';
+  delBtn.innerHTML = '<i class="bi bi-trash"></i>';
+  delBtn.title = '삭제';
+  delBtn.addEventListener('click', async function(e) {
+    e.stopPropagation();
+    if (!confirm('"' + (session.title || '새 대화') + '"을 삭제할까요?')) return;
+    await api('DELETE', '/api/sessions', { ids: [session.id] });
+    showToast('삭제됨');
+    loadChatList();
+    loadSidebarChatList();
+    document.dispatchEvent(new CustomEvent('chat:deleted'));
+  });
+
   row.append(checkBtn, favBtn, info, editBtn, delBtn);
 
-  // 행 클릭 → 해당 채팅으로 이동
   row.addEventListener('click', function(e) {
     if (['INPUT','BUTTON'].includes(e.target.tagName)) return;
     App.currentSessionId = session.id;
@@ -301,9 +311,7 @@ var clCSS =
 '.cl-edit-btn:hover{color:var(--accent);}' +
 '.cl-del-btn{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:4px 6px;border-radius:var(--radius-sm);transition:color 0.15s;}' +
 '.cl-del-btn:hover{color:var(--danger);}' +
-'.cl-empty{text-align:center;padding:60px 20px;color:var(--text-muted);font-size:var(--font-size-sm);}' +
-'.cl-row:hover .cl-del-btn{color:var(--text-muted);}' +
-'#cl-selected-count{font-size:var(--font-size-sm);color:var(--accent);}';
+'.cl-empty{text-align:center;padding:60px 20px;color:var(--text-muted);font-size:var(--font-size-sm);}';
 
 var _clStyle = document.createElement('style');
 _clStyle.textContent = clCSS;
