@@ -181,8 +181,16 @@ class OllamaProvider(BaseProvider):
             return resp.json()["embedding"]
 
     async def vision(self, image_b64: str, prompt: str) -> str:
+        # F-8: base64 크기 기반 능동적 타임아웃
+        size_kb = len(image_b64) * 3 / 4 / 1024
+        if size_kb < 100:
+            timeout = 120
+        elif size_kb < 500:
+            timeout = 300
+        else:
+            timeout = 600
         result = []
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/api/chat",

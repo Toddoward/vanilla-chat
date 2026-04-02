@@ -374,19 +374,31 @@ async def api_open_file(file_id: int):
         raise HTTPException(500, f"파일 열기 실패: {e}")
 
 
-@app.post("/api/files/upload")
-async def api_upload_file(background: BackgroundTasks, file: UploadFile = File(...)):
-    """브라우저에서 파일 업로드 → 임시 저장 → 등록 파이프라인 실행."""
+@app.post("/api/files/tmp_upload")
+async def api_tmp_upload(file: UploadFile = File(...)):
+    """채팅창 비이미지 파일 첨부 → uploads_tmp 임시 저장 → tmp_path 반환.
+    실제 등록은 사용자가 store_file 도구를 통해 요청할 때 수행됨."""
     upload_dir = Path("storage/uploads_tmp")
     upload_dir.mkdir(parents=True, exist_ok=True)
     dest = upload_dir / file.filename
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"name": file.filename, "tmp_path": str(dest)}
+
+
+@app.post("/api/files/upload")
+async def api_upload_file(background: BackgroundTasks, file: UploadFile = File(...)):
+    """브라우저에서 파일 업로드 → storage/files/ 영구 저장 → 등록 파이프라인 실행."""
+    # 브라우저 업로드는 원본 경로를 알 수 없으므로 storage/files/를 영구 저장소로 사용
+    files_dir = Path("storage/files")
+    files_dir.mkdir(parents=True, exist_ok=True)
+    dest = files_dir / file.filename
 
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
     config = load_config()
 
-    # 레코드를 여기서 1회만 생성
     from core.file_engine import detect_file_type
     record = add_file_link(
         original_path=str(dest),
@@ -559,6 +571,9 @@ class SessionCreate(BaseModel):
 class SessionUpdate(BaseModel):
     title: Optional[str] = None
     is_favorite: Optional[int] = None
+    system_prompt: Optional[str] = None   # A-4: 세션 로컬 시스템 프롬프트 (null=글로벌)
+    thinking: Optional[int] = None        # A-5: 세션 로컬 thinking (null=글로벌)
+    agentic: Optional[int] = None         # S-6: 세션 로컬 에이전틱 (null=글로벌)
 
 class SessionDeleteBody(BaseModel):
     ids: list[int]
@@ -591,8 +606,11 @@ async def api_get_session(session_id: int):
 @app.patch("/api/sessions/{session_id}")
 async def api_update_session(session_id: int, body: SessionUpdate):
     kwargs = {}
-    if body.title is not None:      kwargs["title"] = body.title
-    if body.is_favorite is not None: kwargs["is_favorite"] = body.is_favorite
+    if body.title is not None:         kwargs["title"]         = body.title
+    if body.is_favorite is not None:   kwargs["is_favorite"]   = body.is_favorite
+    if body.system_prompt is not None: kwargs["system_prompt"] = body.system_prompt
+    if body.thinking is not None:      kwargs["thinking"]      = body.thinking
+    if body.agentic is not None:       kwargs["agentic"]       = body.agentic
     updated = update_session(session_id, **kwargs)
     if not updated:
         raise HTTPException(404, "세션 없음")
@@ -648,10 +666,17 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
     config           = load_config()
     app_name         = config.get("app", {}).get("name", "Vanilla Chat")
-    system_prompt    = config.get("system_prompt", "You are a helpful assistant.")
-    system_prompt    = system_prompt.replace("$(name)", app_name)
     inference_config = config.get("inference", {})
-    think_enabled    = inference_config.get("think", True)
+
+    # A-4: 시스템 프롬프트 — 세션 로컬 우선, 없으면 글로벌 fallback
+    global_prompt = config.get("system_prompt", "You are a helpful assistant.")
+    global_prompt = global_prompt.replace("$(name)", app_name)
+    system_prompt = session.get("system_prompt") or global_prompt
+
+    # A-5: thinking 토글 — 세션 로컬 우선, 없으면 글로벌 fallback
+    session_thinking = session.get("thinking")
+    think_enabled = bool(session_thinking) if session_thinking is not None \
+        else inference_config.get("think", True)
     response_provider = model_manager.get("response")
 
     ctx = get_context_manager(
@@ -667,7 +692,15 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
     if body.is_regenerate:
         delete_last_assistant_message(body.session_id)
     else:
-        add_message(body.session_id, "user", body.message)
+        # A-2: 첨부 파일명 목록 저장
+        all_attachment_names = (
+            [img["name"] for img in body.images] +
+            [up["name"] for up in body.upload_paths]
+        ) or None
+        add_message(
+            body.session_id, "user", body.message,
+            attachments=all_attachment_names,
+        )
 
     async def event_stream():
         from core.agents import (
@@ -680,7 +713,11 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
         try:
             # ── Stage 1: 오케스트레이터 루프 ──────────────────
-            orchestrator   = await model_manager.get_orchestrator()
+            # A-5: 세션 로컬 agentic 설정 — null이면 글로벌 기본(활성)
+            session_agentic = session.get("agentic")
+            agentic_enabled = session_agentic != 0  # 0이면 명시적 비활성
+
+            orchestrator   = await model_manager.get_orchestrator() if agentic_enabled else None
             vision_provider = model_manager.get("vision")
             tool_results   = []
             stage1_messages = list(messages)
@@ -704,10 +741,22 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                         seen.add(tool_name)
                         agent_label = {
                             "rag_search":    "rag",
+                            "list_files":    "list_files",
                             "analyze_image": "vision",
                             "store_file":    "store",
                         }.get(tool_name, tool_name)
                         yield "data: " + json.dumps({"type": "agent", "agent": agent_label}) + "\n\n"
+
+                # D-1: store_file 성공 결과 → stored 이벤트 발행 (Data Hub 뱃지/목록 갱신)
+                stored_results = [
+                    tr for tr in tool_results
+                    if tr.get("tool") == "store_file" and tr.get("status") == "ok"
+                ]
+                if stored_results:
+                    yield "data: " + json.dumps({
+                        "type": "stored",
+                        "count": len(stored_results),
+                    }) + "\n\n"
 
             else:
                 # Fallback: 오케스트레이터 없을 때 이미지 첨부가 있으면 직접 VLM 분석
@@ -771,10 +820,23 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
             response_text = "".join(full_response)
             thinking_text, clean_response = _extract_thinking_and_response(response_text)
-            add_message(body.session_id, "assistant", clean_response, thinking=thinking_text)
+            add_message(
+                body.session_id, "assistant", clean_response,
+                thinking=thinking_text,
+                sources=all_sources if all_sources else None,
+            )
             _saved = True
 
-            ctx.add_exchange(body.message, clean_response)
+            # A-3: 도구 결과 컨텍스트 포함해서 히스토리 갱신
+            effective_user = body.message
+            if tool_results:
+                ctx_summary = "\n\n".join(
+                    f"[{tr['tool']} 결과 요약]\n{tr['result'][:500]}"
+                    for tr in tool_results if tr.get("status") == "ok"
+                )
+                if ctx_summary:
+                    effective_user = f"{body.message}\n\n{ctx_summary}"
+            ctx.add_exchange(effective_user, clean_response)
 
             yield "data: " + json.dumps({
                 "type": "done",

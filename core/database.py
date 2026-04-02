@@ -137,11 +137,29 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite DESC, updated_at DESC)")
 
-    # 마이그레이션: thinking 컬럼이 없으면 추가
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-    if "thinking" not in existing:
+    # 마이그레이션: messages 테이블 컬럼 추가
+    existing_msg = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "thinking" not in existing_msg:
         conn.execute("ALTER TABLE messages ADD COLUMN thinking TEXT DEFAULT NULL")
         logger.info("messages 테이블에 thinking 컬럼 추가 완료")
+    if "sources" not in existing_msg:
+        conn.execute("ALTER TABLE messages ADD COLUMN sources TEXT DEFAULT NULL")
+        logger.info("messages 테이블에 sources 컬럼 추가 완료")
+    if "attachments" not in existing_msg:
+        conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT NULL")
+        logger.info("messages 테이블에 attachments 컬럼 추가 완료")
+
+    # 마이그레이션: sessions 테이블 컬럼 추가
+    existing_ses = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "system_prompt" not in existing_ses:
+        conn.execute("ALTER TABLE sessions ADD COLUMN system_prompt TEXT DEFAULT NULL")
+        logger.info("sessions 테이블에 system_prompt 컬럼 추가 완료")
+    if "thinking" not in existing_ses:
+        conn.execute("ALTER TABLE sessions ADD COLUMN thinking INTEGER DEFAULT NULL")
+        logger.info("sessions 테이블에 thinking 컬럼 추가 완료")
+    if "agentic" not in existing_ses:
+        conn.execute("ALTER TABLE sessions ADD COLUMN agentic INTEGER DEFAULT NULL")
+        logger.info("sessions 테이블에 agentic 컬럼 추가 완료")
 
 
 def _create_fts_tables(conn: sqlite3.Connection) -> None:
@@ -236,8 +254,8 @@ def get_session(session_id: int) -> Optional[dict]:
 
 
 def update_session(session_id: int, **kwargs) -> Optional[dict]:
-    """title, is_favorite 등 부분 업데이트."""
-    allowed = {"title", "is_favorite"}
+    """title, is_favorite, system_prompt, thinking, agentic 등 부분 업데이트."""
+    allowed = {"title", "is_favorite", "system_prompt", "thinking", "agentic"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
@@ -277,15 +295,25 @@ def delete_sessions(session_ids: list[int]) -> int:
 
 THINKING_MAX_CHARS = 10_000  # thinking 저장 상한 (초과 시 앞부분만 저장)
 
-def add_message(session_id: int, role: str, content: str, thinking: str | None = None) -> dict:
+def add_message(
+    session_id: int,
+    role: str,
+    content: str,
+    thinking: str | None = None,
+    sources: list | None = None,
+    attachments: list | None = None,
+) -> dict:
+    import json as _json
     conn = get_connection()
     try:
-        # thinking 상한 처리
-        thinking_store = thinking[:THINKING_MAX_CHARS] if thinking else None
+        thinking_store    = thinking[:THINKING_MAX_CHARS] if thinking else None
+        sources_store     = _json.dumps(sources,     ensure_ascii=False) if sources     else None
+        attachments_store = _json.dumps(attachments, ensure_ascii=False) if attachments else None
 
         cur = conn.execute(
-            "INSERT INTO messages(session_id, role, content, thinking) VALUES(?,?,?,?) RETURNING *",
-            (session_id, role, content, thinking_store)
+            "INSERT INTO messages(session_id, role, content, thinking, sources, attachments)"
+            " VALUES(?,?,?,?,?,?) RETURNING *",
+            (session_id, role, content, thinking_store, sources_store, attachments_store)
         )
         row = cur.fetchone()
         msg_id = row["id"]
@@ -309,13 +337,29 @@ def add_message(session_id: int, role: str, content: str, thinking: str | None =
 
 
 def get_messages(session_id: int) -> list[dict]:
+    import json as _json
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT * FROM messages WHERE session_id=? ORDER BY id ASC",
             (session_id,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            m = dict(r)
+            # JSON 역직렬화
+            if m.get("sources"):
+                try:
+                    m["sources"] = _json.loads(m["sources"])
+                except Exception:
+                    m["sources"] = []
+            if m.get("attachments"):
+                try:
+                    m["attachments"] = _json.loads(m["attachments"])
+                except Exception:
+                    m["attachments"] = []
+            result.append(m)
+        return result
     finally:
         conn.close()
 
@@ -535,9 +579,14 @@ def add_vectors(chunk_ids: list[int], vectors: list[list[float]]) -> None:
 
 def fts_search_chunks(query: str, top_k: int = 20) -> list[dict]:
     """FTS5 키워드 검색 (prefix 지원)."""
+    import re as _re
     conn = get_connection()
     try:
-        fts_query = query.strip() + '*'
+        # F-7: FTS5 특수문자 이스케이프 — . - * " ( ) 등 포함 시 구문 오류 방지
+        safe_query = _re.sub(r'[^\w\s]', ' ', query).strip()
+        if not safe_query:
+            return []
+        fts_query = safe_query + '*'
         rows = conn.execute("""
             SELECT c.id, c.file_id, c.content,
                    rank AS fts_score

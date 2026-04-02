@@ -14,15 +14,15 @@ inference:
   model_overrides: {}
   num_predict: 8192
   repeat_penalty: 1.1
-  temperature: 0.6
+  temperature: 0.05
   think: false
   top_p: 0.9
 models:
   embedding: bge-m3
   orchestrator: qwen3.5:0.8b
   reranker: qllama\bge-reranker-v2-m3
-  response: qwen3.5:4b
-  vision: qwen3.5:4b
+  response: gemma3:4b
+  vision: gemma3:4b
 rag:
   chunk_overlap: 64
   chunk_size: 512

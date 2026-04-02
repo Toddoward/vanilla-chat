@@ -183,6 +183,7 @@ function clearAttachments() {
 var AGENT_STATUS = {
   orchestrating: '<i class="bi bi-gear-fill"></i> 의도 파악 중...',
   rag:           '<i class="bi bi-search"></i> 저장된 문서 검색 중...',
+  list_files:    '<i class="bi bi-folder2-open"></i> 파일 목록 조회 중...',
   vision:        '<i class="bi bi-eye"></i> 이미지 분석 중...',
   store:         '<i class="bi bi-hdd"></i> 파일 저장 중...',
   api:           '<i class="bi bi-globe"></i> 데이터 수집 중...',
@@ -390,7 +391,15 @@ async function loadSession(sessionId) {
         if (chatEl) chatEl.appendChild(tp);
       }
       var isPlaceholder = msg.role === 'assistant' && PLACEHOLDERS.includes((msg.content || '').trim());
-      appendMessage(msg.role, msg.content, false, isPlaceholder);
+      // A-2: 첨부 파일명 복원
+      var attachNames = msg.attachments && msg.attachments.length ? msg.attachments : undefined;
+      var bubble = appendMessage(msg.role, msg.content, false, isPlaceholder, attachNames);
+      // A-1: RAG 출처 복원
+      if (msg.role === 'assistant' && msg.sources && msg.sources.length) {
+        if (bubble && bubble.parentElement) {
+          appendSources(bubble, msg.sources);
+        }
+      }
     });
     updateLatestLogo();
     scrollToBottom();
@@ -530,14 +539,16 @@ function appendMessage(role, content, animate, isPlaceholder, imageNames) {
     bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : '<p>' + escapeHtml(content) + '</p>';
   }
 
-  // 사용자 버블 — 첨부 이미지 칩 표시
+  // 사용자 버블 — 첨부 파일 칩 표시 (이미지/비이미지 구분)
   if (role === 'user' && imageNames && imageNames.length > 0) {
+    var IMAGE_EXTS = ['png','jpg','jpeg','webp','gif','bmp'];
     var chips = document.createElement('div');
     chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
     imageNames.forEach(function(name) {
+      var isImg = IMAGE_EXTS.includes((name.split('.').pop() || '').toLowerCase());
       var chip = document.createElement('span');
       chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);border:1px solid var(--border);font-size:var(--font-size-xs);color:var(--text-secondary);';
-      chip.innerHTML = '<i class="bi bi-image"></i> ' + escapeHtml(name);
+      chip.innerHTML = (isImg ? '<i class="bi bi-image"></i> ' : '<i class="bi bi-file-earmark"></i> ') + escapeHtml(name);
       chips.appendChild(chip);
     });
     bubble.appendChild(chips);
@@ -625,31 +636,58 @@ async function sendMessage(isRegenerate) {
   input.style.height = 'auto';
   removeLatestLogo();
 
-  // 첨부 이미지를 base64로 변환 (appendMessage 전에 파일명 수집)
-  var imagesPayload = [];
-  var imageFileNames = [];
+  // 첨부 파일 분류: 이미지 / 비이미지
+  var imagesPayload   = [];
+  var uploadPaths     = [];
+  var imageFileNames  = [];
+  var nonImageNames   = [];
+
   if (attachedFiles.length > 0 && !isRegenerate) {
-    var imageFiles = attachedFiles.filter(function(f) {
-      var ext = f.name.split('.').pop().toLowerCase();
-      return ['png','jpg','jpeg','webp','gif','bmp'].includes(ext);
+    var IMAGE_EXTS = ['png','jpg','jpeg','webp','gif','bmp'];
+    var imageFiles    = attachedFiles.filter(function(f) {
+      return IMAGE_EXTS.includes(f.name.split('.').pop().toLowerCase());
     });
+    var nonImageFiles = attachedFiles.filter(function(f) {
+      return !IMAGE_EXTS.includes(f.name.split('.').pop().toLowerCase());
+    });
+
     imageFileNames = imageFiles.map(function(f) { return f.name; });
+    nonImageNames  = nonImageFiles.map(function(f) { return f.name; });
+
+    // 이미지 → base64
     if (imageFiles.length > 0) {
       imagesPayload = await Promise.all(imageFiles.map(function(f) {
         return new Promise(function(resolve) {
           var reader = new FileReader();
           reader.onload = function(e) {
-            var b64 = e.target.result.split(',')[1] || '';
-            resolve({ name: f.name, data: b64 });
+            resolve({ name: f.name, data: e.target.result.split(',')[1] || '' });
           };
           reader.readAsDataURL(f);
         });
       }));
     }
+
+    // 비이미지 → 서버 임시 업로드
+    if (nonImageFiles.length > 0) {
+      uploadPaths = await Promise.all(nonImageFiles.map(async function(f) {
+        var fd = new FormData();
+        fd.append('file', f, f.name);
+        try {
+          var res = await fetch('/api/files/tmp_upload', { method: 'POST', body: fd });
+          return await res.json(); // { name, tmp_path }
+        } catch(e) {
+          showToast('파일 업로드 실패: ' + f.name, 'error');
+          return null;
+        }
+      }));
+      uploadPaths = uploadPaths.filter(Boolean);
+    }
   }
   clearAttachments();
 
-  appendMessage('user', text, true, false, imageFileNames);
+  // F-6: 사용자 버블에 이미지 + 비이미지 칩 모두 표시
+  var allAttachNames = imageFileNames.concat(nonImageNames);
+  appendMessage('user', text, true, false, allAttachNames);
   setStreamingMode(true);
   streamStateMap[sessionId] = { thinking:'', response:'', thinkDone:false, done:false };
   var st = streamStateMap[sessionId];
@@ -665,6 +703,7 @@ async function sendMessage(isRegenerate) {
         message: text,
         is_regenerate: !!isRegenerate,
         images: imagesPayload,
+        upload_paths: uploadPaths,
       }),
       signal: abortController.signal,
     });
@@ -687,6 +726,10 @@ async function sendMessage(isRegenerate) {
           processBuffer(isActive);
         } else if (data.type === 'agent') {
           showAgentStatus(data.agent);
+        } else if (data.type === 'stored') {
+          // D-1: store_file 완료 → Data Hub 뱃지 갱신 + 토스트
+          if (typeof setDatahubBadge === 'function') setDatahubBadge(true);
+          showToast(data.count + '개 파일이 Data Hub에 저장됐습니다.');
         } else if (data.type === 'sources') {
           // RAG 출처 — done 이후 streamWrap에 붙여야 하므로 임시 저장
           st._sources = data.sources;

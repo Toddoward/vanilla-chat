@@ -16,8 +16,10 @@ env/
 # Storage 데이터 (구조 유지, 데이터 제외)
 /storage/db/*
 /storage/vectors/*
+/storage/files/*
 !storage/db/.gitkeep
 !storage/vectors/.gitkeep
+!storage/files/.gitkeep
 
 # OS
 .DS_Store

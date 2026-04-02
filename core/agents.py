@@ -32,15 +32,16 @@ TOOLS = [
         "function": {
             "name": "rag_search",
             "description": (
-                "사용자 질문과 관련된 내용을 로컬에 등록된 문서에서 검색합니다. "
-                "저장된 파일, 문서, 데이터에 대한 질문일 때 사용하세요."
+                "Search registered documents for content related to the user's question. "
+                "Use when the user asks about the CONTENTS of stored files or data. "
+                "Always use a meaningful content-based query, NOT a filename."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "검색할 키워드 또는 질문"
+                        "description": "Content-based search query (not a filename)"
                     }
                 },
                 "required": ["query"]
@@ -50,17 +51,38 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_files",
+            "description": (
+                "List all registered files in local Storage. "
+                "Use when the user asks what files are saved, registered, or available. "
+                "Optionally filter by keyword. Do NOT use this to search file contents — use rag_search for that."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Optional keyword to filter files by name or type (e.g. 'pdf', '약관')"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "analyze_image",
             "description": (
-                "첨부된 이미지를 VLM으로 분석합니다. "
-                "이미지 내용 확인, OCR, 설명을 요청할 때 사용하세요."
+                "Analyze an attached image using a Vision model. "
+                "Use when the user wants to understand, describe, or extract text from an image."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "분석할 이미지 파일명"
+                        "description": "Filename of the image to analyze"
                     }
                 },
                 "required": ["filename"]
@@ -72,15 +94,15 @@ TOOLS = [
         "function": {
             "name": "store_file",
             "description": (
-                "첨부된 파일을 로컬 Storage에 임베딩 등록합니다. "
-                "파일을 저장하거나 나중에 검색 가능하게 등록해달라고 할 때 사용하세요."
+                "Save and register an attached file into local Storage for future search. "
+                "Use when the user wants to save, register, or store a file."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "저장할 파일명"
+                        "description": "Filename of the file to store"
                     }
                 },
                 "required": ["filename"]
@@ -108,7 +130,23 @@ async def execute_tool(
     반환: { "tool": str, "result": str, "status": "ok" | "error" }
     """
     try:
-        if name == "rag_search":
+        if name == "list_files":
+            from core.database import get_all_file_links
+            keyword = args.get("keyword", "").strip().lower()
+            files = get_all_file_links()
+            if keyword:
+                files = [f for f in files if keyword in (f.get("display_name") or "").lower()]
+            if not files:
+                msg = f"'{keyword}' 관련 파일이 없습니다." if keyword else "등록된 파일이 없습니다."
+                return {"tool": name, "result": msg, "status": "ok"}
+            lines = [
+                f"- {f.get('display_name', '?')} ({f.get('file_type', '?')}, {f.get('embedding_status', '?')})"
+                for f in files
+            ]
+            result = f"등록된 파일 {len(files)}개:\n" + "\n".join(lines)
+            return {"tool": name, "result": result, "status": "ok"}
+
+        elif name == "rag_search":
             from core.database import hybrid_search
             from core.file_engine import embed_chunks, rerank
             query  = args.get("query", user_message)
@@ -130,7 +168,6 @@ async def execute_tool(
             try:
                 docs = [r.get("content", "") for r in candidates]
                 scores = rerank(query, docs)
-                # 점수와 함께 정렬 후 상위 top_k 선택 (임계값 0.3 이상만)
                 ranked = sorted(
                     zip(scores, candidates),
                     key=lambda x: x[0],
@@ -138,7 +175,6 @@ async def execute_tool(
                 )
                 results = [r for s, r in ranked[:top_k] if s >= 0.3]
                 if not results:
-                    # 임계값 통과 없으면 상위 top_k 그대로 사용
                     results = [r for _, r in ranked[:top_k]]
                 logger.info("리랭킹 완료: %d→%d개 (임계값 0.3)", len(candidates), len(results))
             except Exception as e:
@@ -149,7 +185,6 @@ async def execute_tool(
                 f"[{r.get('source_name', r.get('display_name', '문서'))}]\n{r.get('content', '')}"
                 for r in results
             )
-            # 출처 메타데이터 수집 (중복 제거)
             seen = set()
             sources = []
             for r in results:
@@ -183,18 +218,45 @@ async def execute_tool(
             up = next((u for u in upload_paths if u.get("name") == filename), None)
             if up is None and upload_paths:
                 up = upload_paths[0]
-            if up is None:
-                return {"tool": name, "result": "저장할 파일을 찾지 못했습니다.", "status": "error"}
+
+            files_dir = Path("storage/files")
+            files_dir.mkdir(parents=True, exist_ok=True)
+
+            if up is not None:
+                # 비이미지 파일 경로: uploads_tmp → storage/files/ 이동
+                import shutil as _shutil
+                permanent_path = files_dir / up["name"]
+                try:
+                    _shutil.move(up["tmp_path"], str(permanent_path))
+                except Exception as e:
+                    logger.warning("파일 이동 실패 [%s → %s]: %s", up["tmp_path"], permanent_path, e)
+                    return {"tool": name, "result": f"파일 이동 실패: {e}", "status": "error"}
+                save_name = up["name"]
+                save_path = str(permanent_path)
+
+            else:
+                # 이미지 파일 경로: images_b64 base64 → storage/files/ 디코딩 저장
+                img = next((i for i in images_b64 if i.get("name") == filename), None)
+                if img is None and images_b64:
+                    img = images_b64[0]
+                if img is None:
+                    return {"tool": name, "result": "저장할 파일을 찾지 못했습니다.", "status": "error"}
+                import base64 as _b64
+                permanent_path = files_dir / img["name"]
+                try:
+                    with open(permanent_path, "wb") as _f:
+                        _f.write(_b64.b64decode(img["data"]))
+                except Exception as e:
+                    logger.warning("이미지 저장 실패: %s", e)
+                    return {"tool": name, "result": f"이미지 저장 실패: {e}", "status": "error"}
+                save_name = img["name"]
+                save_path = str(permanent_path)
+
             from core.file_engine import register_file
-            reg_result = await register_file(up["tmp_path"], up["name"], config)
-            # uploads_tmp 정리 (V5)
-            try:
-                Path(up["tmp_path"]).unlink(missing_ok=True)
-            except Exception:
-                pass
+            reg_result = await register_file(save_path, save_name, config)
             return {
                 "tool": name,
-                "result": f"'{up['name']}' 파일이 Storage에 등록됐습니다. (file_id={reg_result['file_id']})",
+                "result": f"'{save_name}' 파일이 Storage에 등록됐습니다. 이제 검색이 가능합니다.",
                 "status": "ok"
             }
 
@@ -227,10 +289,13 @@ async def run_orchestrator_loop(
         "You are a routing assistant. Your only job is to decide which tools to call.\n"
         "Do NOT answer the user's question yourself.\n\n"
         "Tool usage rules:\n"
-        "- rag_search: Call this when the user asks about any stored documents, files, or registered data. "
-        "Always use this if the user mentions '등록된', '저장된', '문서', '파일', or asks to search/find something.\n"
+        "- list_files: Call this when the user asks what files are saved, registered, or available. "
+        "Use optional keyword to filter. Example: 'what files do I have?', '등록된 파일 보여줘', 'pdf 파일 있어?'\n"
+        "- rag_search: Call this when the user asks about the CONTENTS of stored documents. "
+        "Always use a meaningful CONTENT-BASED query — never use a filename as the query. "
+        "Example query: '해지 조건', '금리 관련 내용', not 'document.pdf'\n"
         "- analyze_image: Call this when an image is attached AND the user wants to understand, describe, or extract text from it.\n"
-        "- store_file: Call this when a file is attached AND the user wants to save, register, or store it for later search.\n"
+        "- store_file: Call this when a file is attached AND the user wants to save or register it for later search.\n"
         "- If none of the above apply, do not call any tool.\n\n"
         "Call tools immediately without explanation. Do not think or reason before deciding."
     )
