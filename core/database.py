@@ -148,6 +148,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     if "attachments" not in existing_msg:
         conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT NULL")
         logger.info("messages 테이블에 attachments 컬럼 추가 완료")
+    if "files" not in existing_msg:
+        conn.execute("ALTER TABLE messages ADD COLUMN files TEXT DEFAULT NULL")
+        logger.info("messages 테이블에 files 컬럼 추가 완료")
 
     # 마이그레이션: sessions 테이블 컬럼 추가
     existing_ses = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -160,6 +163,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     if "agentic" not in existing_ses:
         conn.execute("ALTER TABLE sessions ADD COLUMN agentic INTEGER DEFAULT NULL")
         logger.info("sessions 테이블에 agentic 컬럼 추가 완료")
+    if "vision_resize" not in existing_ses:
+        conn.execute("ALTER TABLE sessions ADD COLUMN vision_resize INTEGER DEFAULT NULL")
+        logger.info("sessions 테이블에 vision_resize 컬럼 추가 완료")
 
 
 def _create_fts_tables(conn: sqlite3.Connection) -> None:
@@ -255,7 +261,7 @@ def get_session(session_id: int) -> Optional[dict]:
 
 def update_session(session_id: int, **kwargs) -> Optional[dict]:
     """title, is_favorite, system_prompt, thinking, agentic 등 부분 업데이트."""
-    allowed = {"title", "is_favorite", "system_prompt", "thinking", "agentic"}
+    allowed = {"title", "is_favorite", "system_prompt", "thinking", "agentic", "vision_resize"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
@@ -302,6 +308,7 @@ def add_message(
     thinking: str | None = None,
     sources: list | None = None,
     attachments: list | None = None,
+    files: list | None = None,
 ) -> dict:
     import json as _json
     conn = get_connection()
@@ -309,11 +316,12 @@ def add_message(
         thinking_store    = thinking[:THINKING_MAX_CHARS] if thinking else None
         sources_store     = _json.dumps(sources,     ensure_ascii=False) if sources     else None
         attachments_store = _json.dumps(attachments, ensure_ascii=False) if attachments else None
+        files_store       = _json.dumps(files,       ensure_ascii=False) if files       else None
 
         cur = conn.execute(
-            "INSERT INTO messages(session_id, role, content, thinking, sources, attachments)"
-            " VALUES(?,?,?,?,?,?) RETURNING *",
-            (session_id, role, content, thinking_store, sources_store, attachments_store)
+            "INSERT INTO messages(session_id, role, content, thinking, sources, attachments, files)"
+            " VALUES(?,?,?,?,?,?,?) RETURNING *",
+            (session_id, role, content, thinking_store, sources_store, attachments_store, files_store)
         )
         row = cur.fetchone()
         msg_id = row["id"]
@@ -358,6 +366,11 @@ def get_messages(session_id: int) -> list[dict]:
                     m["attachments"] = _json.loads(m["attachments"])
                 except Exception:
                     m["attachments"] = []
+            if m.get("files"):
+                try:
+                    m["files"] = _json.loads(m["files"])
+                except Exception:
+                    m["files"] = []
             result.append(m)
         return result
     finally:

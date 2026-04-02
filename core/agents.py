@@ -74,18 +74,20 @@ TOOLS = [
         "function": {
             "name": "analyze_image",
             "description": (
-                "Analyze an attached image using a Vision model. "
-                "Use when the user wants to understand, describe, or extract text from an image."
+                "Analyze one or more attached images using a Vision model. "
+                "Use when the user wants to understand, describe, or extract text from images. "
+                "Pass ALL attached image filenames at once."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "Filename of the image to analyze"
+                    "filenames": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of image filenames to analyze. Include all attached images."
                     }
                 },
-                "required": ["filename"]
+                "required": ["filenames"]
             }
         }
     },
@@ -207,22 +209,46 @@ async def execute_tool(
             return {"tool": name, "result": formatted, "status": "ok", "sources": sources}
 
         elif name == "analyze_image":
-            filename = args.get("filename", "")
             if vision_provider is None:
                 return {"tool": name, "result": "시각 모델이 설정되지 않았습니다.", "status": "error"}
-            # filename에 해당하는 base64 데이터 찾기
-            img = next((i for i in images_b64 if i.get("name") == filename), None)
-            if img is None and images_b64:
-                img = images_b64[0]  # fallback: 첫 번째 이미지
-            if img is None:
+
+            # G-4: filenames 배열 수용 (하위 호환: filename 단일값도 처리)
+            filenames = args.get("filenames") or ([args["filename"]] if args.get("filename") else [])
+            if not filenames:
+                filenames = [img["name"] for img in images_b64] if images_b64 else []
+            if not filenames:
                 return {"tool": name, "result": "분석할 이미지를 찾지 못했습니다.", "status": "error"}
+
+            vis_cfg = config.get("vision", {}).get("preprocess", {})
             prompt = (
                 f"사용자 요청: {user_message}\n\n"
                 "이 이미지를 분석하고 내용을 설명해주세요. "
                 "텍스트가 있다면 모두 추출해주세요."
             )
-            result = await vision_provider.vision(img["data"], prompt)
-            return {"tool": name, "result": result.strip(), "status": "ok"}
+
+            # G-5: 복수 이미지 순차 처리 → 결과 통합
+            results = []
+            for fname in filenames:
+                img = next((i for i in images_b64 if i.get("name") == fname), None)
+                if img is None and len(filenames) == 1 and images_b64:
+                    img = images_b64[0]
+                if img is None:
+                    results.append(f"[{fname}] 이미지를 찾지 못했습니다.")
+                    continue
+                try:
+                    result = await vision_provider.vision(
+                        img["data"], prompt,
+                        resize=vis_cfg.get("resize", False),
+                        max_size=vis_cfg.get("max_size", 512),
+                    )
+                    results.append(f"[{fname}]\n{result.strip()}")
+                except Exception as e:
+                    # 타임아웃 시 Ollama 서버는 계속 처리 중 — 오케스트레이터 재시도로 자연스럽게 해결됨
+                    logger.warning("VLM 분석 실패 [%s]: %s", fname, e)
+                    results.append(f"[{fname}] 이미지 분석에 실패했습니다. 다시 시도합니다.")
+
+            combined = "\n\n".join(results)
+            return {"tool": name, "result": combined, "status": "ok"}
 
         elif name == "store_file":
             filename = args.get("filename", "")
@@ -305,9 +331,17 @@ async def run_orchestrator_loop(
         "- rag_search: Call this when the user asks about the CONTENTS of stored documents. "
         "Always use a meaningful CONTENT-BASED query — never use a filename as the query. "
         "Example query: '해지 조건', '금리 관련 내용', not 'document.pdf'\n"
-        "- analyze_image: Call this when an image is attached AND the user wants to understand, describe, or extract text from it.\n"
+        "- analyze_image: Call this when images are attached AND the user wants to understand, describe, or extract text. "
+        "Pass ALL attached image filenames in the filenames array at once — do NOT call this multiple times for multiple images.\n"
         "- store_file: Call this when a file is attached AND the user wants to save or register it for later search.\n"
         "- If none of the above apply, do not call any tool.\n\n"
+        "Do NOT call rag_search for:\n"
+        "- Questions about the current conversation ('what did you just say?', '방금 한 말이 뭐야?')\n"
+        "- General knowledge questions that don't require stored documents\n"
+        "- Simple tasks like translation, summarization of the above response, math, coding\n\n"
+        "Retry rules:\n"
+        "- If a tool returns a failure message (e.g. '분석에 실패했습니다', 'failed', 'error'), "
+        "call the same tool ONE more time before giving up. Do not proceed to response generation on first failure.\n\n"
         "Call tools immediately without explanation. Do not think or reason before deciding."
     )
 
@@ -406,6 +440,7 @@ async def analyze_images(
     vision_provider,
     images_b64: list[dict],
     user_message: str,
+    config: dict | None = None,
 ) -> str:
     """오케스트레이터 없을 때 이미지를 직접 VLM 분석."""
     if not images_b64 or vision_provider is None:
@@ -415,6 +450,7 @@ async def analyze_images(
         "이 이미지를 분석하고 내용을 설명해주세요. "
         "텍스트가 있다면 모두 추출해주세요."
     )
+    vis_cfg = (config or {}).get("vision", {}).get("preprocess", {})
     results = []
     for img in images_b64:
         name = img.get("name", "image")
@@ -422,7 +458,11 @@ async def analyze_images(
         if not data:
             continue
         try:
-            result = await vision_provider.vision(data, prompt)
+            result = await vision_provider.vision(
+                data, prompt,
+                resize=vis_cfg.get("resize", False),
+                max_size=vis_cfg.get("max_size", 512),
+            )
             results.append(f"[{name}]\n{result.strip()}")
         except Exception as e:
             logger.warning("VLM 분석 실패 [%s]: %s", name, e)

@@ -326,6 +326,47 @@ async function renderModelsSection() {
   capBadge.className = 'st-cap-badge';
   el.appendChild(capBadge);
   await updateVisionHint(modCfg.response || '');
+
+  // G-10: GPU 미감지 경고
+  try {
+    const status = await api('GET', '/api/status');
+    if (status.connected && status.gpu_available === false) {
+      const warning = document.createElement('div');
+      warning.className = 'st-warning';
+      warning.innerHTML =
+        '<i class="bi bi-exclamation-triangle-fill"></i> ' +
+        'GPU가 감지되지 않았습니다. CPU 환경에서는 VLM 분석이 느리고 정확도가 낮을 수 있습니다.';
+      el.appendChild(warning);
+    }
+  } catch {}
+
+  // G-2: VLM 이미지 전처리 설정
+  const visCfg = _config.vision?.preprocess || {};
+  const resizeToggle = makeToggle(
+    'st-vision-resize',
+    !!visCfg.resize,
+    false,
+    (val) => {
+      scheduleSave('vision.preprocess.resize', val);
+      const sizeRow = document.getElementById('st-vision-maxsize-row');
+      if (sizeRow) sizeRow.style.display = val ? '' : 'none';
+    }
+  );
+  el.appendChild(makeRow(
+    '이미지 리사이즈',
+    'VLM 전달 전 이미지를 축소해 추론 속도 향상. 텍스트/도표 이미지는 OFF 권장',
+    resizeToggle
+  ));
+
+  const maxSizeRow = makeRow(
+    '최대 크기 (px)',
+    '리사이즈 시 장변 기준 최대 픽셀 (기본 512)',
+    makeSlider('st-vision-maxsize', 256, 1024, 64, visCfg.max_size ?? 512,
+      (v) => scheduleSave('vision.preprocess.max_size', v))
+  );
+  maxSizeRow.id = 'st-vision-maxsize-row';
+  maxSizeRow.style.display = visCfg.resize ? '' : 'none';
+  el.appendChild(maxSizeRow);
 }
 
 async function updateVisionHint(modelName) {
@@ -693,6 +734,7 @@ const stCSS =
 /* 뱃지/힌트 */
 '.st-cap-badge{margin-top:8px;padding:6px 10px;background:var(--bg-tertiary);border-radius:var(--radius-md);font-size:var(--font-size-xs);color:var(--text-secondary);}' +
 '.st-hint{margin-top:8px;padding:8px 12px;background:var(--accent-dim);border-radius:var(--radius-md);font-size:var(--font-size-xs);color:var(--accent);}' +
+'.st-warning{margin-top:8px;padding:8px 12px;background:rgba(255,100,0,0.1);border:1px solid rgba(255,100,0,0.3);border-radius:var(--radius-md);font-size:var(--font-size-xs);color:var(--warning,#f0a500);}' +
 '.st-loading{color:var(--text-muted);font-size:var(--font-size-sm);padding:20px 0;}' +
 '.st-coming{color:var(--text-muted);font-size:var(--font-size-sm);padding:20px 0;font-style:italic;}' +
 '.st-textarea{width:100%;padding:10px 12px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-size:var(--font-size-sm);font-family:var(--font-mono);line-height:1.6;resize:vertical;margin-top:8px;}' +

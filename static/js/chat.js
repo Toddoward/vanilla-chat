@@ -461,6 +461,34 @@ async function loadSession(sessionId) {
           appendSources(bubble, msg.sources);
         }
       }
+      // list_files 파일 뱃지 복원
+      if (msg.role === 'assistant' && msg.files && msg.files.length) {
+        if (bubble && bubble.parentElement) {
+          appendFiles(bubble, msg.files);
+        }
+      }
+      // 사용자 버블 첨부 칩 — file_id 역조회 후 클릭 열람 연결
+      if (msg.role === 'user' && attachNames && attachNames.length && bubble) {
+        var chips = bubble.querySelectorAll('.bi-image, .bi-file-earmark');
+        attachNames.forEach(function(name, i) {
+          var chipEl = chips[i] ? chips[i].closest('span') : null;
+          if (!chipEl) return;
+          api('GET', '/api/files/by-name?name=' + encodeURIComponent(name))
+            .then(function(res) {
+              if (res && res.file_id) {
+                chipEl.style.cursor = 'pointer';
+                chipEl.title = '클릭하여 파일 열기';
+                chipEl.addEventListener('click', async function() {
+                  try {
+                    await api('POST', '/api/files/' + res.file_id + '/open', {});
+                  } catch(e) {
+                    showToast('파일을 열 수 없습니다.', 'error');
+                  }
+                });
+              }
+            }).catch(function() {}); // 미등록 파일은 무시
+        });
+      }
     });
     updateLatestLogo();
     scrollToBottom();

@@ -33,7 +33,9 @@ from core.providers import (
     get_model_context_length,
     list_ollama_models,
     fetch_all_capabilities,
+    OLLAMA_BASE_URL,
 )
+import httpx as httpx
 from core.context_manager import get_context_manager, clear_context_manager
 from core.file_engine import (
     register_file,
@@ -206,7 +208,6 @@ async def get_status():
     from core.database import get_embedding_dim
     from core.file_engine import get_bge_model
     stored_dim = get_embedding_dim()
-    # 현재 임베딩 모델 차원 조회 (로드된 경우만)
     current_dim = None
     try:
         bge = get_bge_model()
@@ -219,12 +220,25 @@ async def get_status():
         current_dim is not None and
         stored_dim != current_dim
     )
+
+    # G-9: GPU 사용 여부 감지 — Ollama /api/ps의 size_vram 기반
+    gpu_available = False
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/ps")
+            if resp.status_code == 200:
+                models_running = resp.json().get("models", [])
+                gpu_available = any(m.get("size_vram", 0) > 0 for m in models_running)
+    except Exception:
+        pass
+
     return {
         "connected": connected,
         "model": model_manager.response_model_name,
         "context_length": model_manager.context_length,
         "embedding_dim": stored_dim,
         "dim_mismatch": dim_mismatch,
+        "gpu_available": gpu_available,
     }
 
 
@@ -285,6 +299,17 @@ _embedding_progress: dict[int, int] = {}
 async def api_get_files():
     files = get_all_file_links()
     return {"files": files}
+
+
+@app.get("/api/files/by-name")
+async def api_get_file_by_name(name: str):
+    """파일명으로 file_id 역조회 — 재열람 시 첨부 파일 열람용."""
+    files = get_all_file_links()
+    matched = next((f for f in files if f.get("display_name") == name), None)
+    if not matched:
+        raise HTTPException(404, "파일을 찾을 수 없습니다.")
+    return {"file_id": matched["id"], "name": matched["display_name"],
+            "file_type": matched.get("file_type"), "status": matched.get("embedding_status")}
 
 
 @app.get("/api/files/status")
@@ -398,6 +423,8 @@ async def api_upload_file(background: BackgroundTasks, file: UploadFile = File(.
         shutil.copyfileobj(file.file, f)
 
     config = load_config()
+    # G-11: 이미지 RAG를 위해 vision_provider를 config에 주입
+    config["_vision_provider"] = model_manager.get("vision")
 
     from core.file_engine import detect_file_type
     record = add_file_link(
@@ -439,7 +466,36 @@ async def _run_register_file(file_id: int, path: str, display_name: str, config:
         if progress_cb: await progress_cb(file_id, 10)
 
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, extract_text, path, file_type)
+
+        # G-11: 이미지 파일 → VLM 분석
+        if file_type == "image":
+            vision_provider = config.get("_vision_provider")
+            if vision_provider is None:
+                logger.warning("이미지 RAG: vision_provider 없음 [file_id=%d]", file_id)
+                update_file_link_status(file_id, embedding_status="done")
+                if progress_cb: await progress_cb(file_id, 100)
+                return
+            import base64 as _b64
+            with open(path, "rb") as _f:
+                image_b64 = _b64.b64encode(_f.read()).decode()
+            vis_cfg = config.get("vision", {}).get("preprocess", {})
+            prompt = (
+                "이 이미지의 모든 내용을 상세히 설명해주세요. "
+                "텍스트, 도표, 그래프, 도형, 색상 정보를 모두 포함하세요. "
+                "텍스트가 있다면 정확히 추출하세요."
+            )
+            try:
+                text = await vision_provider.vision(
+                    image_b64, prompt,
+                    resize=vis_cfg.get("resize", False),
+                    max_size=vis_cfg.get("max_size", 512),
+                )
+            except Exception as e:
+                logger.warning("이미지 VLM 분석 실패 [file_id=%d]: %s", file_id, e)
+                text = ""
+        else:
+            text = await loop.run_in_executor(None, extract_text, path, file_type)
+
         if progress_cb: await progress_cb(file_id, 30)
 
         chunks = chunk_text(text, chunk_size, overlap)
@@ -571,9 +627,10 @@ class SessionCreate(BaseModel):
 class SessionUpdate(BaseModel):
     title: Optional[str] = None
     is_favorite: Optional[int] = None
-    system_prompt: Optional[str] = None   # A-4: 세션 로컬 시스템 프롬프트 (null=글로벌)
-    thinking: Optional[int] = None        # A-5: 세션 로컬 thinking (null=글로벌)
-    agentic: Optional[int] = None         # S-6: 세션 로컬 에이전틱 (null=글로벌)
+    system_prompt: Optional[str] = None
+    thinking: Optional[int] = None
+    agentic: Optional[int] = None
+    vision_resize: Optional[int] = None
 
 class SessionDeleteBody(BaseModel):
     ids: list[int]
@@ -606,11 +663,12 @@ async def api_get_session(session_id: int):
 @app.patch("/api/sessions/{session_id}")
 async def api_update_session(session_id: int, body: SessionUpdate):
     kwargs = {}
-    if body.title is not None:         kwargs["title"]         = body.title
-    if body.is_favorite is not None:   kwargs["is_favorite"]   = body.is_favorite
-    if body.system_prompt is not None: kwargs["system_prompt"] = body.system_prompt
-    if body.thinking is not None:      kwargs["thinking"]      = body.thinking
-    if body.agentic is not None:       kwargs["agentic"]       = body.agentic
+    if body.title is not None:          kwargs["title"]          = body.title
+    if body.is_favorite is not None:    kwargs["is_favorite"]    = body.is_favorite
+    if body.system_prompt is not None:  kwargs["system_prompt"]  = body.system_prompt
+    if body.thinking is not None:       kwargs["thinking"]       = body.thinking
+    if body.agentic is not None:        kwargs["agentic"]        = body.agentic
+    if body.vision_resize is not None:  kwargs["vision_resize"]  = body.vision_resize
     updated = update_session(session_id, **kwargs)
     if not updated:
         raise HTTPException(404, "세션 없음")
@@ -677,6 +735,18 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
     session_thinking = session.get("thinking")
     think_enabled = bool(session_thinking) if session_thinking is not None \
         else inference_config.get("think", True)
+
+    # G-3: vision 리사이즈 — 세션 로컬 우선, 없으면 글로벌 fallback
+    session_resize = session.get("vision_resize")
+    global_vision_cfg = config.get("vision", {}).get("preprocess", {})
+    vision_resize  = bool(session_resize) if session_resize is not None \
+        else global_vision_cfg.get("resize", False)
+    vision_max_size = global_vision_cfg.get("max_size", 512)
+    # config에 주입해서 execute_tool까지 전달
+    config.setdefault("vision", {}).setdefault("preprocess", {})
+    config["vision"]["preprocess"]["resize"]   = vision_resize
+    config["vision"]["preprocess"]["max_size"] = vision_max_size
+
     response_provider = model_manager.get("response")
 
     ctx = get_context_manager(
@@ -710,6 +780,8 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
         full_response = []
         summarizing   = False
         _saved        = False
+        all_sources   = []   # GeneratorExit/finally에서 안전하게 참조
+        all_files     = []
 
         try:
             # ── Stage 1: 오케스트레이터 루프 ──────────────────
@@ -762,7 +834,7 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                 # Fallback: 오케스트레이터 없을 때 이미지 첨부가 있으면 직접 VLM 분석
                 if body.images and vision_provider:
                     yield "data: " + json.dumps({"type": "agent", "agent": "vision"}) + "\n\n"
-                    img_ctx = await analyze_images(vision_provider, body.images, body.message)
+                    img_ctx = await analyze_images(vision_provider, body.images, body.message, config)
                     if img_ctx:
                         tool_results.append({"tool": "analyze_image", "result": img_ctx, "status": "ok"})
 
@@ -832,6 +904,7 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                 body.session_id, "assistant", clean_response,
                 thinking=thinking_text,
                 sources=all_sources if all_sources else None,
+                files=all_files if all_files else None,
             )
             _saved = True
 
@@ -857,24 +930,41 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                     _generate_title, body.session_id, body.message, response_text, config
                 )
 
+        except GeneratorExit:
+            # 클라이언트 연결 끊김 — is_abort=True로 표시
+            logger.info("클라이언트 연결 끊김 [session=%d]", body.session_id)
+            if not _saved:
+                raw = "".join(full_response)
+                thinking_text, partial = _extract_thinking_and_response(raw)
+                save_content = partial if partial.strip() else ABORT_PLACEHOLDER
+                try:
+                    add_message(
+                        body.session_id, "assistant", save_content,
+                        thinking=thinking_text,
+                        sources=all_sources or None,
+                    )
+                    logger.info("중단 메시지 저장 [session=%d]", body.session_id)
+                except Exception as save_err:
+                    logger.warning("중단 저장 오류: %s", save_err)
+
         except Exception as e:
             logger.error("채팅 오류 [session=%d]: %s", body.session_id, e)
             yield "data: " + json.dumps({"type": "error", "message": str(e)}) + "\n\n"
 
         finally:
             if not _saved:
-                import asyncio as _asyncio
                 raw = "".join(full_response)
-                thinking_text, _ = _extract_thinking_and_response(raw)
-                import sys as _sys
-                exc = _sys.exc_info()[1]
-                is_abort = isinstance(exc, (_asyncio.CancelledError, GeneratorExit))
-                placeholder = ABORT_PLACEHOLDER if is_abort else FAIL_PLACEHOLDER
+                thinking_text, partial = _extract_thinking_and_response(raw)
+                save_content = partial if partial.strip() else FAIL_PLACEHOLDER
                 try:
-                    add_message(body.session_id, "assistant", placeholder, thinking=thinking_text)
-                    logger.info("중단/실패 메시지 저장 [session=%d]: %s", body.session_id, placeholder)
+                    add_message(
+                        body.session_id, "assistant", save_content,
+                        thinking=thinking_text,
+                        sources=all_sources or None,
+                    )
+                    logger.info("실패 메시지 저장 [session=%d]: %d자", body.session_id, len(save_content))
                 except Exception as save_err:
-                    logger.warning("중단/실패 저장 오류 [session=%d]: %s", body.session_id, save_err)
+                    logger.warning("실패 저장 오류 [session=%d]: %s", body.session_id, save_err)
                 if is_first_message:
                     try:
                         fallback_title = body.message.strip()[:20]

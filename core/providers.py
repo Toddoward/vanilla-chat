@@ -14,19 +14,97 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 
+def preprocess_for_vlm(image_b64: str, resize: bool = False, max_size: int = 512) -> str:
+    """
+    VLM 입력 이미지 전처리 — 메모리 버퍼 전용, 원본 무결성 유지.
+
+    1. 알파 채널 처리: 비투명 픽셀 평균 밝기로 배경색 자동 결정
+       - 밝은 콘텐츠 → 어두운 배경(#1E1E1E)
+       - 어두운 콘텐츠 → 밝은 배경(#DCDCDC)
+    2. 리사이즈 (선택적): 장변 기준 max_size로 비율 유지 축소 후 JPEG 압축
+
+    G-1: Phase 7-G 구현
+    """
+    import io, base64
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow 미설치 — 이미지 전처리 생략")
+        return image_b64
+
+    try:
+        raw = base64.b64decode(image_b64)
+        img = Image.open(io.BytesIO(raw))
+
+        # 알파 채널 처리
+        if img.mode in ("RGBA", "LA", "P"):
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            elif img.mode == "LA":
+                img = img.convert("RGBA")
+
+            alpha = img.split()[-1]
+            rgb_img = img.convert("RGB")
+            pixels = list(rgb_img.getdata())
+            alphas = list(alpha.getdata())
+
+            # 비투명 픽셀(alpha > 10)의 평균 밝기 계산
+            visible = [sum(px) / 3 for px, a in zip(pixels, alphas) if a > 10]
+            if visible:
+                avg_brightness = sum(visible) / len(visible)
+                bg_color = (30, 30, 30) if avg_brightness > 128 else (220, 220, 220)
+            else:
+                bg_color = (128, 128, 128)
+
+            bg = Image.new("RGB", img.size, bg_color)
+            bg.paste(rgb_img, mask=alpha)
+            img = bg
+        else:
+            img = img.convert("RGB")
+
+        # 리사이즈 (선택적)
+        if resize:
+            w, h = img.size
+            if max(w, h) > max_size:
+                ratio = max_size / max(w, h)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode()
+
+    except Exception as e:
+        logger.warning("이미지 전처리 실패 — 원본 사용: %s", e)
+        return image_b64
+
+
 def _parse_capabilities(show_data: dict) -> dict:
     """
-    Ollama /api/show 응답에서 capabilities 파싱.
-    반환: { "thinking": bool, "vision": bool, "tools": bool }
+    Ollama /api/show 응답에서 capabilities + 모델 계열 파싱.
+    반환: { "thinking": bool, "vision": bool, "tools": bool, "model_family": str }
     """
     caps_list = show_data.get("capabilities", [])
-    # /api/show REST 응답은 capabilities 배열로 반환
-    # e.g. ["completion", "vision", "thinking", "tools"]
     caps_set = {c.lower() for c in caps_list}
+
+    # G-7: 모델 계열 감지 — modelfile/template에서 추출
+    model_family = "generic"
+    modelfile = show_data.get("modelfile", "").lower()
+    template  = show_data.get("template", "").lower()
+    combined  = modelfile + template
+    if "gemma" in combined:
+        model_family = "gemma"
+    elif "qwen" in combined:
+        model_family = "qwen"
+    elif "llava" in combined or "llama" in combined:
+        model_family = "llava"
+    elif "mistral" in combined:
+        model_family = "mistral"
+
     return {
-        "thinking": "thinking" in caps_set,
-        "vision":   "vision"   in caps_set,
-        "tools":    "tools"    in caps_set,
+        "thinking":     "thinking" in caps_set,
+        "vision":       "vision"   in caps_set,
+        "tools":        "tools"    in caps_set,
+        "model_family": model_family,
     }
 
 
@@ -48,7 +126,7 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    async def vision(self, image_b64: str, prompt: str) -> str:
+    async def vision(self, image_b64: str, prompt: str, resize: bool = False, max_size: int = 512) -> str:
         """이미지 분석 (VLM). base64 인코딩 이미지 입력."""
         ...
 
@@ -180,15 +258,32 @@ class OllamaProvider(BaseProvider):
             resp.raise_for_status()
             return resp.json()["embedding"]
 
-    async def vision(self, image_b64: str, prompt: str) -> str:
+    async def vision(self, image_b64: str, prompt: str, resize: bool = False, max_size: int = 512) -> str:
+        # G-1: 이미지 전처리 (알파 채널 + 선택적 리사이즈)
+        processed_b64 = preprocess_for_vlm(image_b64, resize=resize, max_size=max_size)
+
         # F-8: base64 크기 기반 능동적 타임아웃
-        size_kb = len(image_b64) * 3 / 4 / 1024
+        size_kb = len(processed_b64) * 3 / 4 / 1024
         if size_kb < 100:
             timeout = 120
         elif size_kb < 500:
             timeout = 300
         else:
             timeout = 600
+
+        # G-7: 모델 계열별 메시지 포맷 분기
+        caps = await self.get_capabilities()
+        family = caps.get("model_family", "generic")
+
+        # 현재 Ollama /api/chat의 images 필드는 대부분 모델에서 공통 지원
+        # gemma3/qwen3.5/llava 모두 {"role":"user","content":prompt,"images":[b64]} 포맷 사용
+        # 향후 다른 포맷이 필요한 모델 추가 시 여기서 분기
+        if family in ("gemma", "qwen", "llava", "mistral", "generic"):
+            messages = [{"role": "user", "content": prompt, "images": [processed_b64]}]
+        else:
+            # 알 수 없는 계열 — 동일 포맷 시도
+            messages = [{"role": "user", "content": prompt, "images": [processed_b64]}]
+
         result = []
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
@@ -196,7 +291,7 @@ class OllamaProvider(BaseProvider):
                 f"{self.base_url}/api/chat",
                 json={
                     "model": self.model_name,
-                    "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
+                    "messages": messages,
                     "stream": True
                 }
             ) as response:

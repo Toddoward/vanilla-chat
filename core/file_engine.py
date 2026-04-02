@@ -199,9 +199,40 @@ async def register_file(
         if progress_callback:
             await progress_callback(file_id, 10)
 
-        # 2. 텍스트 추출 (동기 → 스레드풀)
+        # 2. 텍스트 추출 — 이미지는 VLM 분석으로 별도 처리
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, extract_text, file_path, file_type)
+        if file_type == "image":
+            # G-11: 이미지 파일 → VLM으로 내용 분석 후 텍스트로 저장
+            vision_provider = config.get("_vision_provider")
+            if vision_provider is None:
+                logger.warning("이미지 RAG: vision_provider 없음 — 임베딩 건너뜀 [file_id=%d]", file_id)
+                update_file_link_status(file_id, embedding_status="done")
+                if progress_callback:
+                    await progress_callback(file_id, 100)
+                return {"file_id": file_id, "status": "done", "chunks": 0}
+
+            import base64 as _b64
+            with open(file_path, "rb") as _f:
+                image_b64 = _b64.b64encode(_f.read()).decode()
+
+            vis_cfg = config.get("vision", {}).get("preprocess", {})
+            prompt = (
+                "이 이미지의 모든 내용을 상세히 설명해주세요. "
+                "텍스트, 도표, 그래프, 도형, 색상 정보를 모두 포함하세요. "
+                "텍스트가 있다면 정확히 추출하세요."
+            )
+            try:
+                text = await vision_provider.vision(
+                    image_b64, prompt,
+                    resize=vis_cfg.get("resize", False),
+                    max_size=vis_cfg.get("max_size", 512),
+                )
+                logger.info("이미지 VLM 분석 완료 [file_id=%d] %d자", file_id, len(text))
+            except Exception as e:
+                logger.warning("이미지 VLM 분석 실패 [file_id=%d]: %s", file_id, e)
+                text = ""
+        else:
+            text = await loop.run_in_executor(None, extract_text, file_path, file_type)
 
         if progress_callback:
             await progress_callback(file_id, 30)

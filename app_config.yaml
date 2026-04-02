@@ -12,10 +12,10 @@ file_links:
   verify_interval_minutes: 10
 inference:
   model_overrides: {}
-  num_predict: 8192
+  num_predict: 2048
   repeat_penalty: 1.1
   temperature: 0.05
-  think: false
+  think: true
   top_p: 0.9
 models:
   embedding: bge-m3
@@ -61,3 +61,7 @@ system_prompt: 'You are $(name), a personal AI assistant running locally. Pronou
   ## Language
 
   - Always respond in the language the user uses.'
+vision:
+  preprocess:
+    max_size: 256
+    resize: false
