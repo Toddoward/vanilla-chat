@@ -158,12 +158,30 @@ function renderAttachChips() {
   if (!container) return;
   container.innerHTML = '';
   attachedFiles.forEach(function(f, idx) {
+    var IMAGE_EXTS = ['png','jpg','jpeg','webp','gif','bmp'];
+    var isImg = IMAGE_EXTS.includes((f.name.split('.').pop() || '').toLowerCase());
     var chip = document.createElement('div');
     chip.className = 'attach-chip';
     chip.innerHTML =
       '<span class="chip-icon">' + getFileIcon(f.name) + '</span>' +
       '<span class="chip-name">' + escapeHtml(f.name) + '</span>' +
       '<button class="chip-remove" data-idx="' + idx + '"><i class="bi bi-x"></i></button>';
+
+    // D-3: 이미지 칩 호버 시 썸네일 툴팁
+    if (isImg) {
+      var tooltip = document.createElement('div');
+      tooltip.className = 'chip-thumb-tooltip';
+      tooltip.style.cssText = 'display:none;position:absolute;bottom:calc(100% + 6px);left:0;z-index:100;border-radius:var(--radius-md);overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.4);';
+      var img = document.createElement('img');
+      img.style.cssText = 'display:block;max-width:200px;max-height:150px;object-fit:contain;background:var(--bg-secondary);';
+      img.src = URL.createObjectURL(f);
+      tooltip.appendChild(img);
+      chip.style.position = 'relative';
+      chip.appendChild(tooltip);
+      chip.addEventListener('mouseenter', function() { tooltip.style.display = 'block'; });
+      chip.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
+    }
+
     chip.querySelector('.chip-remove').addEventListener('click', function() {
       attachedFiles.splice(idx, 1);
       renderAttachChips();
@@ -198,16 +216,59 @@ function showAgentStatus(type) {
 // ──────────────────────────────────────
 // RAG 출처 목록 (3-9)
 // ──────────────────────────────────────
+function appendFiles(wrap, files) {
+  if (!files || !files.length) return;
+  var div = document.createElement('div');
+  div.className = 'rag-sources';
+  div.innerHTML = '<span class="sources-label">파일</span>';
+  files.forEach(function(f) {
+    var span = document.createElement('span');
+    span.className = 'source-item';
+    var statusIcon = f.status === 'done'
+      ? '<i class="bi bi-check-circle" style="color:var(--success);margin-right:3px;"></i>'
+      : f.status === 'error'
+      ? '<i class="bi bi-exclamation-triangle" style="color:var(--danger);margin-right:3px;"></i>'
+      : '';
+    span.innerHTML = statusIcon + getFileIcon(f.name || '') + ' ' + escapeHtml(f.name || '?');
+    if (f.file_id) {
+      span.style.cursor = 'pointer';
+      span.title = '클릭하여 파일 열기';
+      span.addEventListener('click', async function() {
+        try {
+          await api('POST', '/api/files/' + f.file_id + '/open', {});
+        } catch(e) {
+          showToast('파일을 열 수 없습니다.', 'error');
+        }
+      });
+    }
+    div.appendChild(span);
+  });
+  wrap.appendChild(div);
+}
+
 function appendSources(wrap, sources) {
   if (!sources || !sources.length) return;
   var div = document.createElement('div');
   div.className = 'rag-sources';
-  div.innerHTML = '<span class="sources-label">출처</span>' +
-    sources.map(function(s) {
-      return '<span class="source-item" title="' + escapeHtml(s.path || '') + '">' +
-        getFileIcon(s.name || '') + ' ' + escapeHtml(s.name || s.path || '알 수 없음') +
-        '</span>';
-    }).join('');
+  div.innerHTML = '<span class="sources-label">출처</span>';
+  sources.forEach(function(s) {
+    var span = document.createElement('span');
+    span.className = 'source-item';
+    span.title = s.path || '';
+    span.innerHTML = getFileIcon(s.name || '') + ' ' + escapeHtml(s.name || s.path || '알 수 없음');
+    // D-2: file_id 있으면 클릭 시 파일 열람
+    if (s.file_id) {
+      span.style.cursor = 'pointer';
+      span.addEventListener('click', async function() {
+        try {
+          await api('POST', '/api/files/' + s.file_id + '/open', {});
+        } catch(e) {
+          showToast('파일을 열 수 없습니다.', 'error');
+        }
+      });
+    }
+    div.appendChild(span);
+  });
   wrap.appendChild(div);
 }
 function makeLogoImg() {
@@ -687,7 +748,25 @@ async function sendMessage(isRegenerate) {
 
   // F-6: 사용자 버블에 이미지 + 비이미지 칩 모두 표시
   var allAttachNames = imageFileNames.concat(nonImageNames);
-  appendMessage('user', text, true, false, allAttachNames);
+  var userBubble = appendMessage('user', text, true, false, allAttachNames);
+
+  // D-3: 이미지 칩 클릭 시 blob URL로 열기 (전송 직후만 — base64 데이터 있는 시점)
+  if (imagesPayload.length > 0 && userBubble) {
+    var chipEls = userBubble.querySelectorAll('.bi-image');
+    imagesPayload.forEach(function(img, i) {
+      var chipEl = chipEls[i] ? chipEls[i].closest('span') : null;
+      if (!chipEl) return;
+      chipEl.style.cursor = 'pointer';
+      chipEl.addEventListener('click', function() {
+        var bytes = atob(img.data);
+        var arr = new Uint8Array(bytes.length);
+        for (var j = 0; j < bytes.length; j++) arr[j] = bytes.charCodeAt(j);
+        var blob = new Blob([arr], { type: 'image/png' });
+        var url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+      });
+    });
+  }
   setStreamingMode(true);
   streamStateMap[sessionId] = { thinking:'', response:'', thinkDone:false, done:false };
   var st = streamStateMap[sessionId];
@@ -733,6 +812,9 @@ async function sendMessage(isRegenerate) {
         } else if (data.type === 'sources') {
           // RAG 출처 — done 이후 streamWrap에 붙여야 하므로 임시 저장
           st._sources = data.sources;
+        } else if (data.type === 'files') {
+          // list_files 결과 파일 뱃지
+          st._files = data.files;
         } else if (data.type === 'done') {
           if (rawBuffer) {
             var ia = String(currentSessionId) === String(sessionId);
@@ -761,6 +843,10 @@ async function sendMessage(isRegenerate) {
               // RAG 출처를 버블 내부 하단에 표시
               if (st._sources && st._sources.length) {
                 appendSources(streamBubble, st._sources);
+              }
+              // list_files 결과 파일 뱃지
+              if (st._files && st._files.length) {
+                appendFiles(streamBubble, st._files);
               }
             }
             if (streamWrap) {

@@ -138,13 +138,23 @@ async def execute_tool(
                 files = [f for f in files if keyword in (f.get("display_name") or "").lower()]
             if not files:
                 msg = f"'{keyword}' 관련 파일이 없습니다." if keyword else "등록된 파일이 없습니다."
-                return {"tool": name, "result": msg, "status": "ok"}
+                return {"tool": name, "result": msg, "status": "ok", "files": []}
             lines = [
                 f"- {f.get('display_name', '?')} ({f.get('file_type', '?')}, {f.get('embedding_status', '?')})"
                 for f in files
             ]
             result = f"등록된 파일 {len(files)}개:\n" + "\n".join(lines)
-            return {"tool": name, "result": result, "status": "ok"}
+            # 파일 뱃지용 메타데이터
+            files_meta = [
+                {
+                    "name":   f.get("display_name") or f.get("original_path", "?"),
+                    "file_id": f.get("id"),
+                    "file_type": f.get("file_type", ""),
+                    "status": f.get("embedding_status", ""),
+                }
+                for f in files
+            ]
+            return {"tool": name, "result": result, "status": "ok", "files": files_meta}
 
         elif name == "rag_search":
             from core.database import hybrid_search
@@ -190,9 +200,10 @@ async def execute_tool(
             for r in results:
                 name_key = r.get("source_name") or r.get("display_name") or ""
                 path_key = r.get("source_path") or r.get("original_path") or ""
+                file_id  = r.get("file_id")
                 if name_key not in seen:
                     seen.add(name_key)
-                    sources.append({"name": name_key, "path": path_key})
+                    sources.append({"name": name_key, "path": path_key, "file_id": file_id})
             return {"tool": name, "result": formatted, "status": "ok", "sources": sources}
 
         elif name == "analyze_image":

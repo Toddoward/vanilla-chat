@@ -799,6 +799,14 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
             if all_sources:
                 yield "data: " + json.dumps({"type": "sources", "sources": all_sources}) + "\n\n"
 
+            # list_files 결과 파일 뱃지 이벤트 발행
+            all_files = []
+            for tr in tool_results:
+                if tr.get("tool") == "list_files" and tr.get("files"):
+                    all_files.extend(tr["files"])
+            if all_files:
+                yield "data: " + json.dumps({"type": "files", "files": all_files}) + "\n\n"
+
             # 컨텍스트 요약 필요 시
             if ctx.needs_summary():
                 summarizing = True
