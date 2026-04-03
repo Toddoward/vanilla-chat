@@ -63,5 +63,5 @@ system_prompt: 'You are $(name), a personal AI assistant running locally. Pronou
   - Always respond in the language the user uses.'
 vision:
   preprocess:
-    max_size: 256
-    resize: false
+    max_size: 512
+    resize: true

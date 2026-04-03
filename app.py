@@ -303,11 +303,12 @@ async def api_get_files():
 
 @app.get("/api/files/by-name")
 async def api_get_file_by_name(name: str):
-    """파일명으로 file_id 역조회 — 재열람 시 첨부 파일 열람용."""
+    """파일명으로 file_id 역조회 — 재열람 시 첨부 파일 열람용.
+    미등록 파일은 404 대신 file_id=null 반환 (로그 노이즈 방지)."""
     files = get_all_file_links()
     matched = next((f for f in files if f.get("display_name") == name), None)
     if not matched:
-        raise HTTPException(404, "파일을 찾을 수 없습니다.")
+        return {"file_id": None, "name": name}
     return {"file_id": matched["id"], "name": matched["display_name"],
             "file_type": matched.get("file_type"), "status": matched.get("embedding_status")}
 
@@ -502,10 +503,15 @@ async def _run_register_file(file_id: int, path: str, display_name: str, config:
         if progress_cb: await progress_cb(file_id, 50)
 
         if chunks:
-            vectors = await loop.run_in_executor(None, embed_chunks, chunks)
+            from core.file_engine import embed_chunks_with_sparse
+            from core.database import add_sparse_vectors
+            dense_vecs, sparse_vecs = await loop.run_in_executor(
+                None, embed_chunks_with_sparse, chunks
+            )
             if progress_cb: await progress_cb(file_id, 80)
             chunk_ids = add_chunks(file_id, chunks)
-            add_vectors(chunk_ids, vectors)
+            add_vectors(chunk_ids, dense_vecs)
+            add_sparse_vectors(chunk_ids, sparse_vecs)
 
         update_file_link_status(file_id, embedding_status="done")
         if progress_cb: await progress_cb(file_id, 100)
@@ -796,7 +802,9 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
 
             if orchestrator is not None:
                 yield "data: " + json.dumps({"type": "agent", "agent": "orchestrating"}) + "\n\n"
-                tool_results, stage1_messages = await run_orchestrator_loop(
+
+                # H-1: async generator 소비 — 이벤트와 최종 결과를 순서대로 처리
+                async for item in run_orchestrator_loop(
                     orchestrator,
                     stage1_messages,
                     body.images,
@@ -804,22 +812,15 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                     vision_provider,
                     body.message,
                     config,
-                )
-                # 실행된 도구 종류별 agent 이벤트 발행
-                seen = set()
-                for tr in tool_results:
-                    tool_name = tr.get("tool", "")
-                    if tool_name not in seen:
-                        seen.add(tool_name)
-                        agent_label = {
-                            "rag_search":    "rag",
-                            "list_files":    "list_files",
-                            "analyze_image": "vision",
-                            "store_file":    "store",
-                        }.get(tool_name, tool_name)
-                        yield "data: " + json.dumps({"type": "agent", "agent": agent_label}) + "\n\n"
+                ):
+                    kind, payload = item
+                    if kind == "event":
+                        # 도구 실행 직전 SSE agent 이벤트 즉시 발행 (인디케이터 타이밍 개선)
+                        yield "data: " + json.dumps(payload) + "\n\n"
+                    elif kind == "result":
+                        tool_results = payload
 
-                # D-1: store_file 성공 결과 → stored 이벤트 발행 (Data Hub 뱃지/목록 갱신)
+                # D-1: store_file 성공 결과 → stored 이벤트 발행
                 stored_results = [
                     tr for tr in tool_results
                     if tr.get("tool") == "store_file" and tr.get("status") == "ok"
@@ -839,12 +840,15 @@ async def api_chat(body: ChatRequest, background: BackgroundTasks):
                         tool_results.append({"tool": "analyze_image", "result": img_ctx, "status": "ok"})
 
             # ── Stage 2: 응답 생성 ────────────────────────────
-            # 도구 결과를 일반 텍스트 컨텍스트로 변환 후 user 메시지에 주입
+            # 도구별 최신 성공 결과만 사용 (중복 재시도로 인한 혼란 방지)
             if tool_results:
+                seen_tools = {}
+                for tr in tool_results:
+                    if tr.get("status") == "ok":
+                        seen_tools[tr["tool"]] = tr  # 동일 도구는 최신 결과로 덮어씀
                 context_text = "\n\n".join(
                     f"[{tr['tool']} 결과]\n{tr['result']}"
-                    for tr in tool_results
-                    if tr.get("status") == "ok"
+                    for tr in seen_tools.values()
                 )
                 # 컨텍스트 초과 방지: 결과 텍스트를 3000자로 제한
                 if len(context_text) > 3000:

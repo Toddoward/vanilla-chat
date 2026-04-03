@@ -246,6 +246,9 @@ async def execute_tool(
                     # 타임아웃 시 Ollama 서버는 계속 처리 중 — 오케스트레이터 재시도로 자연스럽게 해결됨
                     logger.warning("VLM 분석 실패 [%s]: %s", fname, e)
                     results.append(f"[{fname}] 이미지 분석에 실패했습니다. 다시 시도합니다.")
+                    # H-2: status를 error로 반환해서 오케스트레이터가 실패를 명확히 인식
+                    combined = "\n\n".join(results)
+                    return {"tool": name, "result": combined, "status": "error"}
 
             combined = "\n\n".join(results)
             return {"tool": name, "result": combined, "status": "ok"}
@@ -317,10 +320,13 @@ async def run_orchestrator_loop(
     vision_provider,
     user_message: str,
     config: dict,
-) -> tuple[list[dict], list[dict]]:
+):
     """
     오케스트레이터(0.8b)를 통해 도구 선택 → 실행 루프.
-    반환: (tool_results, updated_messages)
+    H-1: async generator로 전환 — SSE agent 이벤트를 루프 내에서 직접 yield.
+    yield 패턴:
+      - ("event", {"type": "agent", "agent": ...})  ← SSE 이벤트
+      - ("result", tool_results)                     ← 최종 결과 (마지막 yield)
     """
     ORCHESTRATOR_SYSTEM = (
         "You are a routing assistant. Your only job is to decide which tools to call.\n"
@@ -346,11 +352,10 @@ async def run_orchestrator_loop(
     )
 
     tool_results = []
+    consecutive_failures = {}
 
-    # 오케스트레이터 전용 메시지: system + 최신 user 메시지만
     loop_messages = [{"role": "system", "content": ORCHESTRATOR_SYSTEM}]
 
-    # 최신 user 메시지 추출
     last_user = user_message
     context_hint = ""
     if images_b64:
@@ -366,7 +371,6 @@ async def run_orchestrator_loop(
     })
 
     for _ in range(MAX_TOOL_CALLS):
-        # 오케스트레이터 호출 (non-streaming, tool_calls 파싱)
         raw_chunks = []
         tool_calls_raw = None
         async for chunk in orchestrator.chat(
@@ -381,31 +385,26 @@ async def run_orchestrator_loop(
             else:
                 raw_chunks.append(chunk)
 
-        # tool_calls 없으면 루프 종료 → Stage 2로
         if not tool_calls_raw:
             logger.info("오케스트레이터: 도구 호출 없음 → Stage 2 진행")
             break
 
-        # tool_calls 파싱
         try:
             tool_calls = json.loads(tool_calls_raw)
         except Exception as e:
             logger.warning("tool_calls 파싱 실패: %s | raw: %s", e, tool_calls_raw)
             break
 
-        # 빈 리스트도 종료 처리
         if not tool_calls:
             logger.info("오케스트레이터: 빈 tool_calls → Stage 2 진행")
             break
 
-        # 오케스트레이터 응답을 메시지 히스토리에 추가
         loop_messages.append({
             "role": "assistant",
             "content": "".join(raw_chunks),
             "tool_calls": tool_calls,
         })
 
-        # 각 tool_call 실행
         for tc in tool_calls:
             fn   = tc.get("function", {})
             name = fn.get("name", "")
@@ -416,6 +415,15 @@ async def run_orchestrator_loop(
             except Exception:
                 args = {}
 
+            # H-1: 도구 실행 직전 SSE agent 이벤트 yield (인디케이터 타이밍 개선)
+            agent_label = {
+                "rag_search":    "rag",
+                "list_files":    "list_files",
+                "analyze_image": "vision",
+                "store_file":    "store",
+            }.get(name, name)
+            yield ("event", {"type": "agent", "agent": agent_label})
+
             logger.info("도구 실행: %s %s", name, args)
             result = await execute_tool(
                 name, args, images_b64, upload_paths,
@@ -423,13 +431,26 @@ async def run_orchestrator_loop(
             )
             tool_results.append(result)
 
-            # tool_result를 메시지에 추가
+            # H-3: 도구별 연속 실패 횟수 추적 → 2회 연속 실패 시 루프 조기 종료
+            if result.get("status") == "error":
+                consecutive_failures[name] = consecutive_failures.get(name, 0) + 1
+                if consecutive_failures[name] >= 2:
+                    logger.warning("도구 연속 실패 2회 [%s] → 루프 조기 종료", name)
+                    loop_messages.append({
+                        "role": "tool",
+                        "content": result["result"],
+                    })
+                    yield ("result", tool_results)
+                    return
+            else:
+                consecutive_failures[name] = 0
+
             loop_messages.append({
                 "role": "tool",
                 "content": result["result"],
             })
 
-    return tool_results, loop_messages
+    yield ("result", tool_results)
 
 
 # ──────────────────────────────────────

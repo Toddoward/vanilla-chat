@@ -128,6 +128,42 @@ def embed_chunks(chunks: list[str]) -> list[list[float]]:
     return result["dense_vecs"].tolist()
 
 
+def embed_chunks_with_sparse(chunks: list[str]) -> tuple[list[list[float]], list[dict]]:
+    """
+    청크 리스트를 Dense + Sparse 벡터로 동시 변환.
+    H-4: BGE-M3 Sparse 활성화 — 전문 용어/고유명사 매칭 정확도 향상.
+    반환: (dense_vecs, sparse_vecs)
+      sparse_vecs: [{"indices": [int, ...], "values": [float, ...]}, ...]
+    """
+    model = get_bge_model()
+    try:
+        result = model.encode(
+            chunks,
+            batch_size=12,
+            max_length=512,
+            return_dense=True,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        dense_vecs = result["dense_vecs"].tolist()
+        # sparse_vecs: list of {token_id: weight} dict
+        raw_sparse = result.get("lexical_weights", [])
+        sparse_vecs = []
+        for sv in raw_sparse:
+            if isinstance(sv, dict):
+                indices = list(sv.keys())
+                values  = [float(sv[k]) for k in indices]
+            else:
+                indices, values = [], []
+            sparse_vecs.append({"indices": indices, "values": values})
+        return dense_vecs, sparse_vecs
+    except Exception as e:
+        logger.warning("Sparse 임베딩 실패 — Dense만 사용: %s", e)
+        dense_vecs = embed_chunks(chunks)
+        sparse_vecs = [{"indices": [], "values": []} for _ in chunks]
+        return dense_vecs, sparse_vecs
+
+
 # ──────────────────────────────────────────
 # 리랭커 (BGE-Reranker-v2-M3 via FlagEmbedding)
 # ──────────────────────────────────────────
@@ -245,15 +281,19 @@ async def register_file(
             await progress_callback(file_id, 50)
 
         if chunks:
-            # 4. 임베딩 (동기 → 스레드풀)
-            vectors = await loop.run_in_executor(None, embed_chunks, chunks)
+            # 4. Dense + Sparse 임베딩 (동기 → 스레드풀)
+            dense_vecs, sparse_vecs = await loop.run_in_executor(
+                None, embed_chunks_with_sparse, chunks
+            )
 
             if progress_callback:
                 await progress_callback(file_id, 80)
 
             # 5. DB 저장
+            from core.database import add_chunks, add_vectors, add_sparse_vectors
             chunk_ids = add_chunks(file_id, chunks)
-            add_vectors(chunk_ids, vectors)
+            add_vectors(chunk_ids, dense_vecs)
+            add_sparse_vectors(chunk_ids, sparse_vecs)
 
         # 완료
         update_file_link_status(file_id, embedding_status="done")
@@ -278,10 +318,21 @@ async def reembed_all_files(config: dict, progress_callback=None) -> dict:
     """
     from core.database import (
         get_all_file_links, update_file_link_status,
-        add_chunks, add_vectors, delete_file_chunks, drop_vec_table,
+        add_chunks, add_vectors, add_sparse_vectors,
+        delete_file_chunks, drop_vec_table,
     )
 
-    drop_vec_table()  # 기존 차원 테이블 삭제
+    drop_vec_table()  # 기존 Dense 벡터 테이블 삭제
+    # H-6: sparse_chunks도 초기화
+    try:
+        from core.database import get_connection
+        conn = get_connection()
+        conn.execute("DELETE FROM sparse_chunks")
+        conn.commit()
+        conn.close()
+        logger.info("sparse_chunks 초기화 완료")
+    except Exception as e:
+        logger.warning("sparse_chunks 초기화 실패: %s", e)
 
     files = get_all_file_links()
     if not files:
@@ -309,9 +360,12 @@ async def reembed_all_files(config: dict, progress_callback=None) -> dict:
             chunks = chunk_text(text, chunk_size, overlap)
 
             if chunks:
-                vectors   = await loop.run_in_executor(None, embed_chunks, chunks)
+                dense_vecs, sparse_vecs = await loop.run_in_executor(
+                    None, embed_chunks_with_sparse, chunks
+                )
                 chunk_ids = add_chunks(file_id, chunks)
-                add_vectors(chunk_ids, vectors)
+                add_vectors(chunk_ids, dense_vecs)
+                add_sparse_vectors(chunk_ids, sparse_vecs)
 
             update_file_link_status(file_id, embedding_status="done")
             done_count += 1

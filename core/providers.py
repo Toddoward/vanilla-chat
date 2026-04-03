@@ -262,14 +262,26 @@ class OllamaProvider(BaseProvider):
         # G-1: 이미지 전처리 (알파 채널 + 선택적 리사이즈)
         processed_b64 = preprocess_for_vlm(image_b64, resize=resize, max_size=max_size)
 
-        # F-8: base64 크기 기반 능동적 타임아웃
-        size_kb = len(processed_b64) * 3 / 4 / 1024
-        if size_kb < 100:
-            timeout = 120
-        elif size_kb < 500:
-            timeout = 300
-        else:
+        # H-7: 이미지 해상도(픽셀 수) 기반 능동적 타임아웃
+        # 파일 크기 기반은 리사이즈 시 오히려 타임아웃이 짧아지는 역효과 발생
+        # Ollama VLM 추론 시간은 파일 크기가 아닌 실제 픽셀 수에 비례
+        try:
+            import io as _io, base64 as _b64
+            from PIL import Image as _Image
+            _raw = _b64.b64decode(processed_b64)
+            _img = _Image.open(_io.BytesIO(_raw))
+            pixel_count = _img.width * _img.height
+        except Exception:
+            pixel_count = 512 * 512  # fallback
+
+        if pixel_count <= 256 * 256:
+            timeout = 200
+        elif pixel_count <= 512 * 512:
+            timeout = 400
+        elif pixel_count <= 1024 * 1024:
             timeout = 600
+        else:
+            timeout = 720
 
         # G-7: 모델 계열별 메시지 포맷 분기
         caps = await self.get_capabilities()

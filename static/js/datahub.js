@@ -112,6 +112,8 @@ function renderFilesPanel() {
       '</div>' +
     '</div>' +
     '<div id="dh-bulk-actions" style="display:none;">' +
+      '<button id="dh-select-all-btn" class="dh-action-btn"><i class="bi bi-check-all"></i> 전체 선택</button>' +
+      '<button id="dh-deselect-btn" class="dh-action-btn" style="display:none;"><i class="bi bi-x-lg"></i> 전체 해제</button>' +
       '<span id="dh-selected-count">0개 선택됨</span>' +
       '<button id="dh-delete-selected" class="dh-danger-btn"><i class="bi bi-trash"></i> 선택 삭제</button>' +
     '</div>' +
@@ -130,6 +132,29 @@ function renderFilesPanel() {
   // 일괄 삭제
   var delBtn = document.getElementById('dh-delete-selected');
   if (delBtn) delBtn.addEventListener('click', deleteSelectedFiles);
+
+  // 전체 선택
+  var selAllBtn = document.getElementById('dh-select-all-btn');
+  if (selAllBtn) selAllBtn.addEventListener('click', function() {
+    document.querySelectorAll('.dh-check-icon').forEach(function(icon) {
+      icon.classList.add('checked');
+      var id = parseInt(icon.closest('.dh-file-row').dataset.fileId);
+      if (id) dhSelectedFiles.add(id);
+    });
+    updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
+    updateDhSelectBtns();
+  });
+
+  // 전체 해제
+  var deselBtn = document.getElementById('dh-deselect-btn');
+  if (deselBtn) deselBtn.addEventListener('click', function() {
+    document.querySelectorAll('.dh-check-icon').forEach(function(icon) {
+      icon.classList.remove('checked');
+    });
+    dhSelectedFiles.clear();
+    updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
+    updateDhSelectBtns();
+  });
 }
 
 function setupDropzone() {
@@ -174,6 +199,21 @@ async function loadFiles() {
   }
 }
 
+function updateDhSelectBtns() {
+  var total   = document.querySelectorAll('.dh-check-icon').length;
+  var checked = document.querySelectorAll('.dh-check-icon.checked').length;
+  var allBtn  = document.getElementById('dh-select-all-btn');
+  var deselBtn = document.getElementById('dh-deselect-btn');
+  if (!allBtn || !deselBtn) return;
+  if (checked >= total && total > 0) {
+    allBtn.style.display   = 'none';
+    deselBtn.style.display = '';
+  } else {
+    allBtn.style.display   = '';
+    deselBtn.style.display = 'none';
+  }
+}
+
 function renderFileList(files) {
   var list = document.getElementById('dh-file-list');
   if (!list) return;
@@ -193,8 +233,25 @@ function renderFileList(files) {
     var row = document.createElement('div');
     row.className = 'dh-file-row';
     row.dataset.fileId = f.id;
-    row.innerHTML =
-      '<input type="checkbox" class="dh-check" data-id="' + f.id + '"/>' +
+
+    // 체크 버튼 (chatlist와 동일한 cl-check-icon 스타일)
+    var checkBtn = document.createElement('button');
+    checkBtn.className = 'dh-check-btn';
+    checkBtn.title = '선택';
+    var checkIcon = document.createElement('span');
+    checkIcon.className = 'dh-check-icon';
+    checkBtn.appendChild(checkIcon);
+    checkBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var checked = checkIcon.classList.toggle('checked');
+      if (checked) dhSelectedFiles.add(f.id);
+      else dhSelectedFiles.delete(f.id);
+      updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
+      updateDhSelectBtns();
+    });
+    row.appendChild(checkBtn);
+
+    row.insertAdjacentHTML('beforeend',
       '<span class="dh-file-icon">' + getFileIcon(f.display_name || '') + '</span>' +
       '<div class="dh-file-info">' +
         '<span class="dh-file-name">' + escapeHtml(f.display_name || f.original_path) + '</span>' +
@@ -205,14 +262,8 @@ function renderFileList(files) {
         ? '<button class="dh-reregister-btn" data-id="' + f.id + '">재등록</button>'
         : '') +
       '<button class="dh-open-btn" data-id="' + f.id + '" title="파일 열기"><i class="bi bi-box-arrow-up-right"></i></button>' +
-      '<button class="dh-delete-btn" data-id="' + f.id + '"><i class="bi bi-trash"></i></button>';
-
-    // 체크박스
-    row.querySelector('.dh-check').addEventListener('change', function(e) {
-      if (e.target.checked) dhSelectedFiles.add(f.id);
-      else dhSelectedFiles.delete(f.id);
-      updateBulkActions('dh-bulk-actions', 'dh-selected-count', dhSelectedFiles);
-    });
+      '<button class="dh-delete-btn" data-id="' + f.id + '"><i class="bi bi-trash"></i></button>'
+    );
 
     // 파일 열기
     row.querySelector('.dh-open-btn').addEventListener('click', async function() {
@@ -493,11 +544,16 @@ var dhCSS =
 /* 일괄 삭제 바 */
 '#dh-bulk-actions{display:flex;align-items:center;gap:12px;padding:8px 12px;background:var(--accent-dim);border:1px solid rgba(232,201,122,0.3);border-radius:var(--radius-md);margin-bottom:12px;}' +
 '#dh-selected-count{font-size:var(--font-size-sm);color:var(--accent);flex:1;}' +
+'.dh-action-btn{padding:5px 10px;border-radius:var(--radius-md);background:var(--bg-tertiary);color:var(--text-secondary);font-size:var(--font-size-xs);border:1px solid var(--border);cursor:pointer;transition:color 0.15s;}' +
+'.dh-action-btn:hover{color:var(--text-primary);}' +
 
 /* 파일 행 */
 '.dh-file-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius-md);border:1px solid var(--border-subtle);margin-bottom:6px;background:var(--bg-secondary);transition:background 0.15s;}' +
 '.dh-file-row:hover{background:var(--surface);}' +
-'.dh-check{flex-shrink:0;cursor:pointer;accent-color:var(--accent);}' +
+'.dh-check-btn{flex-shrink:0;background:none;border:none;cursor:pointer;padding:8px;margin:-8px;display:flex;align-items:center;justify-content:center;}' +
+'.dh-check-icon{display:block;width:16px;height:16px;border:1.5px solid var(--text-muted);border-radius:3px;background:transparent;position:relative;transition:border-color 0.15s,background 0.15s;flex-shrink:0;}' +
+'.dh-check-icon.checked{background:var(--accent);border-color:var(--accent);}' +
+'.dh-check-icon.checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:2px solid var(--bg-primary);border-top:none;border-left:none;transform:rotate(45deg);}' +
 '.dh-file-icon{font-size:18px;flex-shrink:0;}' +
 '.dh-file-info{flex:1;min-width:0;}' +
 '.dh-file-name{display:block;font-size:var(--font-size-sm);font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +

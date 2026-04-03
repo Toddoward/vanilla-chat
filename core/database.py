@@ -183,6 +183,15 @@ def _create_fts_tables(conn: sqlite3.Connection) -> None:
         USING fts5(content, file_id UNINDEXED, chunk_id UNINDEXED)
     """)
 
+    # H-4: BGE-M3 Sparse 벡터 저장 테이블 (기존 vec_chunks 구조 변경 없이 별도 추가)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sparse_chunks (
+            chunk_id  INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+            s_indices TEXT NOT NULL,  -- JSON array of token ids
+            s_values  TEXT NOT NULL   -- JSON array of weights
+        )
+    """)
+
 
 def _try_load_sqlite_vec(conn: sqlite3.Connection) -> None:
     """sqlite-vec 확장 로드 시도. 없으면 경고만 출력."""
@@ -534,6 +543,14 @@ def delete_file_chunks(file_id: int) -> None:
                 )
             except Exception:
                 pass  # vec_chunks 없으면 무시
+            # sparse_chunks는 ON DELETE CASCADE로 자동 삭제되나 명시적으로도 처리
+            try:
+                placeholders = ",".join("?" * len(chunk_ids))
+                conn.execute(
+                    f"DELETE FROM sparse_chunks WHERE chunk_id IN ({placeholders})", chunk_ids
+                )
+            except Exception:
+                pass
         conn.execute("DELETE FROM fts_chunks WHERE file_id=?", (file_id,))
         conn.execute("DELETE FROM chunks WHERE file_id=?", (file_id,))
         conn.commit()
@@ -548,6 +565,25 @@ def drop_vec_table() -> None:
         conn.execute("DROP TABLE IF EXISTS vec_chunks")
         conn.commit()
         logger.info("vec_chunks 테이블 삭제 완료 (재임베딩 필요)")
+    finally:
+        conn.close()
+
+
+def add_sparse_vectors(chunk_ids: list[int], sparse_vecs: list[dict]) -> None:
+    """H-4: BGE-M3 Sparse 벡터 저장."""
+    import json as _json
+    conn = get_connection()
+    try:
+        for chunk_id, sv in zip(chunk_ids, sparse_vecs):
+            conn.execute(
+                "INSERT OR REPLACE INTO sparse_chunks(chunk_id, s_indices, s_values) VALUES(?,?,?)",
+                (chunk_id,
+                 _json.dumps(sv.get("indices", []), ensure_ascii=False),
+                 _json.dumps(sv.get("values", []),  ensure_ascii=False))
+            )
+        conn.commit()
+    except Exception as e:
+        logger.warning("Sparse 벡터 저장 실패: %s", e)
     finally:
         conn.close()
 
@@ -641,6 +677,61 @@ def vec_search_chunks(query_vec: list[float], top_k: int = 20) -> list[dict]:
         conn.close()
 
 
+def sparse_search_chunks(query: str, top_k: int = 20) -> list[dict]:
+    """
+    H-5: BGE-M3 Sparse 벡터 검색.
+    쿼리 토큰과 저장된 Sparse 벡터 간 내적(dot product)으로 유사도 계산.
+    """
+    import json as _json
+    conn = get_connection()
+    try:
+        # 쿼리를 BGE-M3 Sparse로 인코딩
+        from core.file_engine import get_bge_model
+        model = get_bge_model()
+        enc = model.encode(
+            [query],
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        raw = enc.get("lexical_weights", [{}])[0]
+        if not isinstance(raw, dict) or not raw:
+            return []
+        query_sparse = {int(k): float(v) for k, v in raw.items()}
+
+        # sparse_chunks 전체 스캔 후 내적 계산
+        rows = conn.execute(
+            "SELECT sc.chunk_id, sc.s_indices, sc.s_values, c.file_id, c.content "
+            "FROM sparse_chunks sc JOIN chunks c ON c.id = sc.chunk_id"
+        ).fetchall()
+
+        scored = []
+        for row in rows:
+            try:
+                indices = _json.loads(row["s_indices"])
+                values  = _json.loads(row["s_values"])
+                doc_sparse = {int(i): float(v) for i, v in zip(indices, values)}
+                score = sum(query_sparse.get(i, 0) * v for i, v in doc_sparse.items())
+                if score > 0:
+                    scored.append({
+                        "id":      row["chunk_id"],
+                        "file_id": row["file_id"],
+                        "content": row["content"],
+                        "sparse_score": score,
+                    })
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x["sparse_score"], reverse=True)
+        return scored[:top_k]
+
+    except Exception as e:
+        logger.warning("Sparse 검색 실패: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
 def rrf_merge(
     fts_results: list[dict],
     vec_results: list[dict],
@@ -668,15 +759,43 @@ def rrf_merge(
     return [id_to_doc[cid] for cid in sorted_ids[:top_k]]
 
 
+def rrf_merge_triple(
+    fts_results: list[dict],
+    vec_results: list[dict],
+    sparse_results: list[dict],
+    top_k: int = 5,
+    k: int = 60,
+) -> list[dict]:
+    """H-5: FTS5 + Dense + Sparse 3중 RRF 병합."""
+    scores: dict[int, float] = {}
+    id_to_doc: dict[int, dict] = {}
+
+    for results in (fts_results, vec_results, sparse_results):
+        for rank, doc in enumerate(results):
+            cid = doc["id"]
+            scores[cid] = scores.get(cid, 0) + 1 / (k + rank + 1)
+            id_to_doc[cid] = doc
+
+    sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)
+    return [id_to_doc[cid] for cid in sorted_ids[:top_k]]
+
+
 def hybrid_search(
     query: str,
     query_vec: Optional[list[float]],
     top_k: int = 5,
 ) -> list[dict]:
-    """FTS5 + 벡터 하이브리드 검색 → RRF 병합."""
-    fts = fts_search_chunks(query, top_k=20)
-    vec = vec_search_chunks(query_vec, top_k=20) if query_vec else []
-    merged = rrf_merge(fts, vec, top_k=top_k)
+    """H-5: FTS5 + Dense + Sparse 3중 하이브리드 검색 → RRF 병합."""
+    fts    = fts_search_chunks(query, top_k=20)
+    vec    = vec_search_chunks(query_vec, top_k=20) if query_vec else []
+    sparse = sparse_search_chunks(query, top_k=20)
+
+    # sparse가 있으면 3중 RRF, 없으면 기존 2중 RRF 유지
+    if sparse:
+        merged = rrf_merge_triple(fts, vec, sparse, top_k=top_k)
+    else:
+        merged = rrf_merge(fts, vec, top_k=top_k)
+
     # 파일 정보 보강
     conn = get_connection()
     try:

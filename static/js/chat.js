@@ -833,6 +833,9 @@ async function sendMessage(isRegenerate) {
           processBuffer(isActive);
         } else if (data.type === 'agent') {
           showAgentStatus(data.agent);
+        } else if (data.type === 'start') {
+          // Stage 2 진입 — 응답 생성 중 인디케이터
+          showAgentStatus('responding');
         } else if (data.type === 'stored') {
           // D-1: store_file 완료 → Data Hub 뱃지 갱신 + 토스트
           if (typeof setDatahubBadge === 'function') setDatahubBadge(true);
